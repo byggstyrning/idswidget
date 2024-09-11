@@ -1,0 +1,26 @@
+version: '3'
+services:
+  idswidget:
+    build:
+      context: .
+      dockerfile: idswidget/Dockerfile
+    ports:
+      - "3000:3000"
+    depends_on:
+      - ifctester
+    environment:
+      - IFCTESTER_URL=http://ifctester
+      - TZ=Europe/Stockholm # Set your timezone
+    volumes:
+      - ./shared/uploads:/app/uploads
+      - ./shared/output:/app/output
+
+  ifctester:
+    build:
+      context: .
+      dockerfile: ifctester/Dockerfile
+    environment:
+      - TZ=Europe/Stockholm # Set your timezone
+    volumes:
+      - ./shared/uploads:/app/uploads
+      - ./shared/output:/app/output

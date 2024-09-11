@@ -1,0 +1,4 @@
+.aider*
+
+/shared/uploads/*
+!/shared/uploads/.gitkeep

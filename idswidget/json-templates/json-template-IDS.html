@@ -1,0 +1,105 @@
+
+
+<div id="container-IDS">
+    <header>
+        <p><strong>Date of validation: {{date}}</strong></p>
+    </header>
+    <h2>Summary</h2>
+    <div class="container">
+    <div class="percent {{#if status}}pass{{else}}fail{{/if}}"
+            data-percent="{{percent_checks_pass}}"
+            style="--final-width: {{percent_checks_pass}}%; width: 0%;">
+        </div>
+</div>
+
+
+    <p>
+        <span class="item {{#if status}}pass{{else}}fail{{/if}}">{{#if status}}Pass{{else}}Fail{{/if}}</span>
+        <span class="item">
+            Specifications passed: <strong>{{total_specifications_pass}}</strong> / <strong>{{total_specifications}}</strong>
+        </span>
+        <span class="item">
+            Requirements passed: <strong>{{total_requirements_pass}}</strong> / <strong>{{total_requirements}}</strong>
+        </span>
+        <span class="item">
+            Checks passed: <strong>{{total_checks_pass}}</strong> / <strong>{{total_checks}}</strong>
+        </span>
+    </p>
+    <hr>
+    {{#each specifications}}
+    <section>
+        <h2>{{name}}</h2>
+        {{#if description}}
+        <p>{{description}}</p>
+        {{/if}}
+        {{#if instructions}}
+        <p><em>{{instructions}}</em></p>
+        {{/if}}
+
+        <div class="container">
+        <div class="percent {{#if status}}pass{{else}}fail{{/if}}"
+                data-percent="{{percent_checks_pass}}"
+                style="--final-width: {{percent_checks_pass}}%; width: 0%;">
+            </div>
+    </div>
+    
+        <p>
+            <span class="item {{#if status}}pass{{else}}fail{{/if}}">{{#if status}}Pass{{else}}Fail{{/if}}</span>
+            <span class="item">
+                Checks passed: <strong>{{total_checks_pass}}</strong> / <strong>{{total_checks}}</strong>
+            </span>
+            <span class="item">
+                Elements passed: <strong>{{total_applicable_pass}}</strong> / <strong>{{total_applicable}}</strong>
+            </span>
+        </p>
+        <details class="applicability" title="Show for what elements this specification applies to">
+        <summary>Applicability</summary>
+        <ul>
+            {{#each applicability}}
+            <li>{{this}}</li>
+            {{/each}}
+        </ul>
+        </details>
+        <p>
+            <strong>Requirements</strong>
+        </p>
+        <ol>
+            {{#each requirements}}
+            <li class="{{#if status}}pass{{else}}fail{{/if}}">
+                <details>
+                <summary class="summary-toggle" 
+                    data-spec-index="{{@../index}}"
+                    data-req-index="{{@index}}">
+                    {{#if status}}<i class="fa-solid fa-check"></i>{{else}}<i class="fa-solid fa-chevron-down"></i>{{/if}}  
+                    {{description}}
+                    
+                    {{#if total_fail}}
+                    <button class="btn highlight failed_entities fa-magnifying-glass"
+                        title="Highlight the failed entities in StreamBIM"
+                        data-spec-index="{{@../index}}"
+                        data-req-index="{{@index}}"
+                        type="button"></button>
+
+                {{#anyTags failed_entities}}
+                <button class="btn copy-btn failed_entities fa-clipboard"
+                        title="Click to copy the ID. Use 'Select Elements by ID' in Revit"
+                        data-spec-index="{{@../index}}"
+                        data-req-index="{{@index}}"
+                        type="button"></button>
+                {{/anyTags}}
+                    {{/if}}
+                </summary>
+                    {{#if total_fail}}
+                    <div id="table-container-{{@../index}}-{{@index}}" class="table-container"></div>
+                    <button class="load-more" data-spec-index="{{@../index}}" data-req-index="{{@index}}" style="display: none;">Load More</button>
+                    
+                    {{/if}}
+                
+                </details>
+            </li>
+            {{/each}}
+        </ol>
+    </section>
+    {{/each}}
+    <hr>
+</div>    
