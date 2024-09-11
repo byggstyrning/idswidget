@@ -14,7 +14,8 @@ The IDS Widget is a FastHTML application that provides functionality for validat
 2. `ifctester/ifctester-service.py`: FastAPI service for IFC validation (based on [ifcpipeline](https://github.com/jonatanjacobsson/ifcpipeline))
 3. `idswidget/js/ids-widget.js`: Client-side JavaScript for widget functionality
 4. `shared/classes.py`: Shared data models
-5. Docker configuration for both the widget and ifctester service
+5. `idswidget/json-templates`: Handlebar templates to generate the ui from the json coming from the ifctester-service.
+6. Docker configuration for both the widget and ifctester service
 
 ## Features
 
@@ -57,10 +58,6 @@ For more detailed information on how to use the StreamBIM Widget API, please ref
 - `idswidget/`: Contains the main FastHTML application
 - `ifctester/`: Contains the IDS validation service
 - `shared/`: Contains shared uploads
-
-## FastHTML Integration
-
-This project uses FastHTML for rapid development and efficient rendering. The main entry point is `idswidget/idswidget.py`.
 
 ## Contributing
 
