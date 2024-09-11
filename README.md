@@ -2,6 +2,8 @@
 
 This project contains an IDS (Information Delivery Specification) widget for StreamBIM, built using FastHTML.
 
+![chrome_8nXiRorPml](https://github.com/user-attachments/assets/0ad9700e-adfa-449c-b4ca-d46db8e756e7)
+
 ## Project Overview
 
 The IDS Widget is a FastHTML application that provides functionality for validating IFC files against IDS specifications. It integrates with StreamBIM and uses the ifctester service for validation.
