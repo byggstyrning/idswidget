@@ -1,5 +1,6 @@
-var base64query = btoa('{"filter":{"isDeleted":false,"freetext":".ifc"},"timeZone":"Europe/Stockholm"}');
+var base64query = '';
 var jsondata = '';
+var projectID = '';
 
 document.addEventListener('DOMContentLoaded', function() {
   console.log("IDS Widget loaded");
@@ -9,14 +10,30 @@ document.addEventListener('DOMContentLoaded', function() {
     StreamBIM.setStyles(".color-code-values--left-sliders-active {margin-left: 40%;}");
     
     StreamBIM.getProjectId().then((result) => {
-        // Implementera document Label in till populateSelectElement
         projectID = result;
+        const queryIds = { filter: { freetext: ".ids", isDeleted: false } };
+        const base64queryIds = btoa(JSON.stringify(queryIds));
         
-        StreamBIM.makeApiRequest({url: 'https://app.streambim.com/project-'+projectID+'/api/v1/documents/export/json/?query='+base64query})
-
+        StreamBIM.makeApiRequest({url: `https://app.streambim.com/project-${projectID}/api/v1/documents/export/json/?query=${base64queryIds}`})
         .then(response => JSON.parse(response))
-        .then(documentObjects => populateSelectElement(documentObjects))
-        .catch(error => console.error(error));
+        .then(idsDocuments => populateSelectElement(idsDocuments, 'ids_filename'))
+        .then(() => {
+          document.querySelector('select[name="ids_filename"]').disabled = false;
+          document.querySelector('select[name="ids_filename"]').options[0].text = "Select IDS file for Validation...";
+        })
+        .catch(error => console.error("Error fetching ids documents:", error));
+
+        const queryIfc = { filter: { freetext: ".ifc", isDeleted: false } };
+        const base64queryIfc = btoa(JSON.stringify(queryIfc));
+        
+        StreamBIM.makeApiRequest({url: `https://app.streambim.com/project-${projectID}/api/v1/documents/export/json/?query=${base64queryIfc}`})
+        .then(response => JSON.parse(response))
+        .then(ifcDocuments => populateSelectElement(ifcDocuments, 'ifc_filename'))
+        .then(() => {
+          document.querySelector('select[name="ifc_filename"]').disabled = false;
+          document.querySelector('select[name="ifc_filename"]').options[0].text = "Select IFC file for Validation...";
+        })
+        .catch(error => console.error("Error fetching documents:", error));
 
         document.addEventListener("click", function(event) {
           if (event.target.classList.contains("goto-btn")) {
@@ -40,9 +57,9 @@ document.addEventListener('DOMContentLoaded', function() {
   }).catch((error) => console.error(error));
 });
 
-function populateSelectElement(json) {
+function populateSelectElement(json, selectName) {
   console.log(json);
-  var select = document.querySelector('select[name="ifc_filename"]');
+  var select = document.querySelector(`select[name="${selectName}"]`);
   
   // Clear existing options except the first one
   while (select.options.length > 1) {
@@ -54,149 +71,155 @@ function populateSelectElement(json) {
     var option = document.createElement('option');
     option.value = item.id;
     option.textContent = item.filename;
-    option.dataset.idsFilename = item.filename;
     option.dataset.uploadDate = item.uploadedDate;
     option.dataset.filesize = item.filesize;
-
-    const modelLabel = item.labels.find(label => label.id === 1007);
-    if (modelLabel) {
-      option.dataset.idsFilename = modelLabel.id;
-    }
     
-    if(item.revisions && item.revisions.length > 1) {
-      var lastRevision = item.revisions[1];
-      option.dataset.revId = lastRevision.revision;
+    if (item.revision) {
+      option.dataset.revId = item.revision;
     }
     select.appendChild(option);
   });
-    // Add the change event handler
-
-  select.addEventListener('change', function() {
-    // Check if the selected option has a value
-    if (this.value) {
-      // Find the empty option and remove it
-      select.querySelector('option:not([value])')?.remove();
-          
-      // Get the selected option's value (the ID)
-      var documentID = this.value;
-      // Get the selected option's text (the filename)
-      var filename = select.options[select.selectedIndex].text;
-      // Extract the file extension from the filename
-      var uploadedDate = select.options[select.selectedIndex].dataset.uploadDate;
-      var filesize = select.options[select.selectedIndex].dataset.filesize;
-
-      StreamBIM.makeApiRequest({ url: 'https://app.streambim.com/project-' + projectID + '/api/v1/documents/' + documentID + '/downloadlink' })
-        .then((downloadlink) => {
-          // Disable the select element while waiting for the response
-          select.disabled = true;
-
-          // Show a loading indicator
-          const loadingIndicator = document.createElement('div');
-          loadingIndicator.id = 'loading-indicator';
-          loadingIndicator.textContent = 'Loading...';
-          select.parentNode.insertBefore(loadingIndicator, select.nextSibling);
-
-          fetch('/validate', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/x-www-form-urlencoded'
-            },
-            body: new URLSearchParams({
-              projectID: projectID,
-              downloadlink: 'https://app.streambim.com/project-' + projectID + '/api/v1/' + downloadlink,
-              filename: filename,
-              uploadDate: uploadedDate,
-              fileSize: filesize
-            })
-          })
-          .then(response => response.json())
-          .then(data => {
-            // Remove the loading indicator
-            const loadingIndicator = document.getElementById('loading-indicator');
-            if (loadingIndicator) {
-              loadingIndicator.remove();
-            }
-            if (typeof data === 'object') { // This means it's JSON
-              jsondata = JSON.parse(data.report);
-              // Determine the template to use based on the document name
-              let templateId = 'json-template-IDS';
-
-              // Use the determined template
-              const templateScript = document.getElementById(templateId).innerHTML;
-              const template = Handlebars.compile(templateScript);
-              const html = template(jsondata);
-
-              document.addEventListener("click", function(event) {
-                if (event.target.classList.contains("summary-toggle")) {
-                  var detailsElement = event.target.closest('details');
-              
-                  if (detailsElement.hasAttribute('open')) {
-                      // If details are open, clear the content and close the details
-                      var reqIndex = event.target.dataset.reqIndex;
-                      var specIndex = event.target.dataset.specIndex;
-                      document.getElementById('table-container-' + specIndex + '-' + reqIndex).innerHTML = '';
-                      document.querySelector('.load-more[data-spec-index="' + specIndex + '"][data-req-index="' + reqIndex + '"]').style.display = 'none';
-                  } else {
-                      // If details are closed, load content
-                      var reqIndex = event.target.dataset.reqIndex;
-                      var specIndex = event.target.dataset.specIndex;
-                      var context = jsondata.specifications[specIndex].requirements[reqIndex];
-                      var templateScript = document.getElementById('json-template-IDS-requirement').innerHTML;
-                      var template = Handlebars.compile(templateScript);
-              
-                      var initialRows = context.failed_entities.slice(0, 100);
-                      var html = template({failed_entities: initialRows});
-                      document.getElementById('table-container-' + specIndex + '-' + reqIndex).innerHTML = html;
-              
-                      if (context.failed_entities.length > 100) {
-                          document.querySelector('.load-more[data-spec-index="' + specIndex + '"][data-req-index="' + reqIndex + '"]').style.display = 'block';
-                      }
-                  }
-                }
-              });
-            
-              document.addEventListener("click", function(event) {
-                if (event.target.classList.contains("load-more")) {
-                  var reqIndex = event.target.dataset.reqIndex;
-                  var specIndex = event.target.dataset.specIndex;
-                  var context = jsondata.specifications[specIndex].requirements[reqIndex];
-              
-                  // Determine the current count of loaded rows
-                  var currentCount = document.querySelectorAll('#table-container-' + specIndex + '-' + reqIndex + ' .row-class').length;
-                  console.log(currentCount);
-                  // Slice the next 100 rows based on the currentCount
-                  var additionalRows = context.failed_entities.slice(currentCount, currentCount + 100);
-                  var templateScript = document.getElementById('json-template-IDS-requirement').innerHTML;
-                  var template = Handlebars.compile(templateScript);
-                  var html = template({failed_entities: additionalRows});
-              
-                  document.getElementById('table-container-' + specIndex + '-' + reqIndex).insertAdjacentHTML('beforeend', html);
-              
-                  // Hide 'Load More' button if all rows are loaded
-                  if (currentCount + 100 >= context.failed_entities.length) {
-                      event.target.style.display = 'none';
-                  }
-                }
-              });
-          
-              document.getElementById("report").innerHTML = html;
-              
-            } else {
-              // If it's not JSON, assume it's HTML or text
-              console.log("data recieved not json");
-            }
-          })
-          .catch(error => {
-            console.error(error);
-          });
-          
-        }).catch(function(error) {
-          logError('getProjectId', error);
-        });
-
-    } 
-  });
 }
+
+
+document.addEventListener('DOMContentLoaded', function() {
+  document.getElementById('validate').addEventListener('click', function() {
+
+    const ifcSelect = document.querySelector('select[name="ifc_filename"]');
+    const idsSelect = document.querySelector('select[name="ids_filename"]');
+
+    var documentIfcID = ifcSelect.value;
+    var documentIdsID = idsSelect.value;
+    var ifcFilename = ifcSelect.options[ifcSelect.selectedIndex].text;
+    var ifcUploadedDate = ifcSelect.options[ifcSelect.selectedIndex].dataset.uploadDate;
+    var ifcFilesize = ifcSelect.options[ifcSelect.selectedIndex].dataset.filesize;
+
+    var idsFilename = idsSelect.options[idsSelect.selectedIndex].textContent;
+
+    StreamBIM.makeApiRequest({ url: 'https://app.streambim.com/project-' + projectID + '/api/v1/documents/' + documentIfcID + '/downloadlink' })
+    .then((downloadlinkIfc) => {
+      StreamBIM.makeApiRequest({ url: 'https://app.streambim.com/project-' + projectID + '/api/v1/documents/' + documentIdsID + '/downloadlink' })
+      .then((downloadlinkIds) => {
+          // Disable the select element while waiting for the response
+        ifcSelect.disabled = true;
+        idsSelect.disabled = true;
+
+        // Clear the #report innerHTML
+        document.getElementById('report').innerHTML = '';
+        
+        // Show a loading indicator
+        const loadingIndicator = document.createElement('div');
+        loadingIndicator.id = 'loading-indicator';
+        loadingIndicator.textContent = 'Validating...';
+        document.querySelector('.file-selection-container').insertAdjacentElement('afterend', loadingIndicator);
+
+        fetch('/validate', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded'
+          },
+          body: new URLSearchParams({
+            projectID: projectID,
+            downloadlinkIfc: 'https://app.streambim.com/project-' + projectID + '/api/v1/' + downloadlinkIfc,
+            downloadlinkIds: 'https://app.streambim.com/project-' + projectID + '/api/v1/' + downloadlinkIds,
+            filename: ifcFilename,
+            idsFilename: idsFilename,
+            uploadDate: ifcUploadedDate,
+            fileSize: ifcFilesize
+          })
+        })
+        .then(response => response.json())
+        .then(data => {
+          // Remove the loading indicator
+          const loadingIndicator = document.getElementById('loading-indicator');
+          if (loadingIndicator) {
+            loadingIndicator.remove();
+            ifcSelect.disabled = false;
+            idsSelect.disabled = false;
+          }
+          if (typeof data === 'object') { // This means it's JSON
+            jsondata = JSON.parse(data.report);
+            // Determine the template to use based on the document name
+            let templateId = 'json-template-IDS';
+
+            // Use the determined template
+            const templateScript = document.getElementById(templateId).innerHTML;
+            const template = Handlebars.compile(templateScript);
+            const html = template(jsondata);
+
+            document.addEventListener("click", function(event) {
+              if (event.target.classList.contains("summary-toggle")) {
+                var detailsElement = event.target.closest('details');
+            
+                if (detailsElement.hasAttribute('open')) {
+                    // If details are open, clear the content and close the details
+                    var reqIndex = event.target.dataset.reqIndex;
+                    var specIndex = event.target.dataset.specIndex;
+                    document.getElementById('table-container-' + specIndex + '-' + reqIndex).innerHTML = '';
+                    document.querySelector('.load-more[data-spec-index="' + specIndex + '"][data-req-index="' + reqIndex + '"]').style.display = 'none';
+                } else {
+                    // If details are closed, load content
+                    var reqIndex = event.target.dataset.reqIndex;
+                    var specIndex = event.target.dataset.specIndex;
+                    var context = jsondata.specifications[specIndex].requirements[reqIndex];
+                    var templateScript = document.getElementById('json-template-IDS-requirement').innerHTML;
+                    var template = Handlebars.compile(templateScript);
+            
+                    var initialRows = context.failed_entities.slice(0, 100);
+                    var html = template({failed_entities: initialRows});
+                    document.getElementById('table-container-' + specIndex + '-' + reqIndex).innerHTML = html;
+            
+                    if (context.failed_entities.length > 100) {
+                        document.querySelector('.load-more[data-spec-index="' + specIndex + '"][data-req-index="' + reqIndex + '"]').style.display = 'block';
+                    }
+                }
+              }
+            });
+          
+            document.addEventListener("click", function(event) {
+              if (event.target.classList.contains("load-more")) {
+                var reqIndex = event.target.dataset.reqIndex;
+                var specIndex = event.target.dataset.specIndex;
+                var context = jsondata.specifications[specIndex].requirements[reqIndex];
+            
+                // Determine the current count of loaded rows
+                var currentCount = document.querySelectorAll('#table-container-' + specIndex + '-' + reqIndex + ' .row-class').length;
+                console.log(currentCount);
+                // Slice the next 100 rows based on the currentCount
+                var additionalRows = context.failed_entities.slice(currentCount, currentCount + 100);
+                var templateScript = document.getElementById('json-template-IDS-requirement').innerHTML;
+                var template = Handlebars.compile(templateScript);
+                var html = template({failed_entities: additionalRows});
+            
+                document.getElementById('table-container-' + specIndex + '-' + reqIndex).insertAdjacentHTML('beforeend', html);
+            
+                // Hide 'Load More' button if all rows are loaded
+                if (currentCount + 100 >= context.failed_entities.length) {
+                    event.target.style.display = 'none';
+                }
+              }
+            });
+        
+            document.getElementById("report").innerHTML = html;
+            
+          } else {
+            // If it's not JSON, assume it's HTML or text
+            console.log("data received not json");
+          }
+        })
+        .catch(error => {
+          console.error(error);
+        });
+        
+      })
+      .catch(function(error) {
+        console.error('Could not get downloadlink for IDS file', error);
+      });
+    }).catch(function(error) {
+      console.error('Could not get downloadlink for IFC file', error);
+    });
+  });
+});
 
 // Helper function to get the value of a given key in an array of objects
 function getValue(properties, key) {
@@ -311,7 +334,7 @@ function highlightFailedEntities(specIndex, reqIndex) {
     console.log(query);
     console.log(result);
     StreamBIM.colorCodeByProperty({pset, propertyKey}).then( () => {
-      StreamBIM.setSearchVisualizationMode('FADED');
+      StreamBIM.setSearchVisualizationMode('hidden');
       StreamBIM.zoomToSearchResult();
     });
   }).catch( (error) => {console.error(error)});

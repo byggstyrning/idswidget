@@ -5,7 +5,7 @@ services:
       context: .
       dockerfile: idswidget/Dockerfile
     ports:
-      - "3000:3000"
+      - "4000:3000"
     depends_on:
       - ifctester
     environment:

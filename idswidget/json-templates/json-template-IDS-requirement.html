@@ -10,8 +10,10 @@
         {{#each failed_entities}}
         <tr class="row-class">
             <td>
-              <button class="btn highlight element" title="Highlight the element in StreamBIM" data-guid="{{global_id}}" type="button"><i class="fa-solid fa-magnifying-glass"></i></button>
-              {{#if tag}}<button class="btn copy-btn" title="Click to copy the ID. Use 'Select Elements by ID' in Revit" data-tag="{{tag}}" type="button"><i class="fa-solid fa-clipboard"></i></button> {{/if}}
+              <button class="btn highlight element fa-solid fa-magnifying-glass" title="Highlight the element in StreamBIM" data-guid="{{global_id}}" type="button"></button>
+              {{#if tag}}
+              <button class="btn copy-btn fa-solid fa-clipboard" title="Click to copy the ID. Use 'Select Elements by ID' in Revit" data-tag="{{tag}}" type="button"></button>
+              {{/if}}
             </td>
             <td>
               {{#if name}}<span title="Name">{{name}}</span> {{/if}}

@@ -9,7 +9,7 @@
 body {
     color: #FFF;
     font-family: Arial, sans-serif;
-    padding: 55px 20px 10px !important;
+    padding: 20px 20px 10px !important;
 } 
 .btn .fa-clipboard, .btn .fa-magnifying-glass{
     color: var(--streambim-orange);
@@ -30,6 +30,52 @@ button.btn {
     position: relative;
     height: 41px;
 }
+.file-selection-container {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+}
+
+.file-dropdown {
+    flex-grow: 1;
+    margin-right: 10px;
+    padding: 10px;
+    background-color: rgba(0, 0, 0, 0.5);
+    color: #FFF;
+    border: none;
+    border-radius: 5px;
+    appearance: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    background-image: url('data:image/svg+xml;utf8,<svg fill="%23ffffff" height="24" viewBox="0 0 24 24" width="24" xmlns="http://www.w3.org/2000/svg"><path d="M7 10l5 5 5-5z"/><path d="M0 0h24v24H0z" fill="none"/></svg>');
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+}
+
+.file-dropdown:focus {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--streambim-orange);
+}
+
+.validate-btn {
+    padding: 10px 20px;
+    background-color: var(--streambim-orange);
+    color: #FFF;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    transition: background-color 0.3s ease;
+}
+
+.validate-btn:hover {
+    background-color: var(--streambim-orange-dark);
+}
+
+.validate-btn:active {
+    transform: translateY(1px);
+}
+
 .btn.high-clashes {
     background-color: var(--streambim-orange)6e;
 }
@@ -204,7 +250,7 @@ select {
     font-weight: 700;
     margin: 0 auto;
     padding: 5px 10px;    
-    font-size: 18px;
+    font-size: 13px;
 }
 span.item {
     border: 1px solid #ffffff47;

@@ -80,13 +80,13 @@
                         data-req-index="{{@index}}"
                         type="button"></button>
 
-                {{#anyTags failed_entities}}
-                <button class="btn copy-btn failed_entities fa-clipboard"
-                        title="Click to copy the ID. Use 'Select Elements by ID' in Revit"
-                        data-spec-index="{{@../index}}"
-                        data-req-index="{{@index}}"
-                        type="button"></button>
-                {{/anyTags}}
+                    {{#anyTags failed_entities}}
+                    <button class="btn copy-btn failed_entities fa-clipboard"
+                            title="Click to copy the ID. Use 'Select Elements by ID' in Revit"
+                            data-spec-index="{{@../index}}"
+                            data-req-index="{{@index}}"
+                            type="button"></button>
+                    {{/anyTags}}
                     {{/if}}
                 </summary>
                     {{#if total_fail}}

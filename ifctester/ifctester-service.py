@@ -19,7 +19,8 @@ async def ifctester(request: IfcTesterRequest, response: Response):
         ifc_path = os.path.join(project_upload_dir, ifc_filename)
         
         # Process IDS filename
-        ids_path = os.path.join(project_upload_dir, request.ids_filename)
+        ids_filename = request.ids_filename.replace(f"uploads/{request.projectID}/", "")
+        ids_path = os.path.join(project_upload_dir, ids_filename)
         
         # Process output filename
         output_filename = request.output_filename.replace(f"uploads/{request.projectID}/", "")
@@ -29,7 +30,7 @@ async def ifctester(request: IfcTesterRequest, response: Response):
         if not os.path.exists(ifc_path):
             raise HTTPException(status_code=404, detail=f"IFC file {ifc_filename} not found in {project_upload_dir}")
         if not os.path.exists(ids_path):
-            raise HTTPException(status_code=404, detail=f"IDS file {request.ids_filename} not found in {project_upload_dir}")
+            raise HTTPException(status_code=404, detail=f"IDS file {ids_filename} not found in {project_upload_dir}")
 
         # Load the IDS file
         my_ids = ids.open(ids_path)

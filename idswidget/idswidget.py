@@ -23,6 +23,7 @@ hdrs = (
     Link(rel="stylesheet", href=f"/styles.css?t={int(time.time())}"),
     Link(rel="stylesheet", href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.1.1/css/all.min.css"),
     Script(src="https://cdnjs.cloudflare.com/ajax/libs/handlebars.js/4.7.7/handlebars.min.js"),
+
     Script(src="/js/streambim-widget-api.min.js"),
     Script(src=f"/js/ids-widget.js?t={int(time.time())}"),
     Meta(charset="utf-8"),
@@ -72,7 +73,12 @@ def get():
         tuple: A tuple containing FastHTML elements for the main page.
     """
     return (
-        Select(Option("Select IFC file for Validation..."), name="ifc_filename"),
+        Div(
+            Select(Option("Loading IDS files..."), name="ids_filename", cls="file-dropdown", disabled=True),
+            Select(Option("Loading IFC files..."), name="ifc_filename", cls="file-dropdown", disabled=True),
+            Button("Validate", id="validate", cls="validate-btn"),
+            cls="file-selection-container",
+        ),
         Div(id="report"),
         Script(
             load_template("/app/json-templates/json-template-IDS.html"),
@@ -87,14 +93,16 @@ def get():
     )
 
 @rt('/validate')   
-def post(projectID: str, downloadlink: str, filename: str, uploadDate: str, fileSize: str):
+def post(projectID: str, downloadlinkIfc: str, downloadlinkIds: str, filename: str, uploadDate: str, fileSize: str, idsFilename: str):
     """
     Handle POST requests to validate IFC files.
 
     Args:
         projectID (str): The ID of the project.
-        downloadlink (str): The URL to download the IFC file.
+        downloadlinkIfc (str): The URL to download the IFC file.    
+        downloadlinkIds (str): The URL to download the IDS file.
         filename (str): The name of the IFC file.
+        idsFilename (str): The name of the IDS file.
         uploadDate (str): The upload date of the file.
         fileSize (str): The size of the file.
 
@@ -102,13 +110,15 @@ def post(projectID: str, downloadlink: str, filename: str, uploadDate: str, file
         dict: The validation result as a JSON object.
     """
     # Create a unique identifier for the file
-    file_identifier = f"{filename}_{uploadDate}_{fileSize}"
+    file_identifier = f"{filename}_{idsFilename}_{uploadDate}_{fileSize}"
     safe_identifier = ''.join(c if c.isalnum() else '_' for c in file_identifier)
     
     # Ensure the project-specific 'uploads' directory exists
     project_dir = os.path.join('uploads', projectID)
-    os.makedirs(project_dir, exist_ok=True)
-    
+    if not os.path.exists(project_dir):
+        os.makedirs(project_dir)
+        os.chmod(project_dir, 0o755)  # rwxr-xr-x
+
     # Check if the file with this identifier already exists
     existing_files = [f for f in os.listdir(project_dir) if f.startswith(safe_identifier)]
     if existing_files:
@@ -120,22 +130,29 @@ def post(projectID: str, downloadlink: str, filename: str, uploadDate: str, file
                 return json.load(f)
 
     # If not found, download the file
-    response = requests.get(downloadlink)
-    if response.status_code != 200:
-        return json.dumps({"error": "Failed to download the file"}), 400
+    responseIfc = requests.get(downloadlinkIfc)
+    responseIds = requests.get(downloadlinkIds)
+    if responseIfc.status_code != 200:
+        return json.dumps({"error": "Failed to download the IFC file"}), 400
+    if responseIds.status_code != 200:
+        return json.dumps({"error": "Failed to download the IDS file"}), 400
+
 
     # Save the file with the unique identifier
-    file_path = os.path.join(project_dir, f"{safe_identifier}.ifc")
-    with open(file_path, 'wb') as f:
-        f.write(response.content)
+    file_path_ifc = os.path.join(project_dir, f"{safe_identifier}.ifc")
+    file_path_ids = os.path.join(project_dir, f"{idsFilename}")
+    with open(file_path_ifc, 'wb') as f:
+        f.write(responseIfc.content)
+    with open(file_path_ids, 'wb') as f:
+        f.write(responseIds.content)
 
     # Prepare for validation
     output_filename = f"{safe_identifier}.json"
     output_path = os.path.join(project_dir, output_filename)
     
     validation_payload = IfcTesterRequest(
-        ifc_filename=file_path,
-        ids_filename="ARK.ids",
+        ifc_filename=file_path_ifc,
+        ids_filename=file_path_ids,
         output_filename=output_path,
         report_type="json",
         projectID=projectID
@@ -151,6 +168,10 @@ def post(projectID: str, downloadlink: str, filename: str, uploadDate: str, file
         
         result = validation_response.json()
         
+        # Delete the IFC and IDS files after validation
+        os.remove(file_path_ifc)
+        os.remove(file_path_ids)
+
         # Save validation result
         with open(output_path, 'w') as f:
             json.dump(result, f)
