@@ -18,8 +18,10 @@ document.addEventListener('DOMContentLoaded', function() {
         .then(response => JSON.parse(response))
         .then(idsDocuments => populateSelectElement(idsDocuments, 'ids_filename'))
         .then(() => {
-          document.querySelector('select[name="ids_filename"]').disabled = false;
-          document.querySelector('select[name="ids_filename"]').options[0].text = "Select IDS file for Validation...";
+            const idsSelect = document.querySelector('select[name="ids_filename"]');
+            idsSelect.disabled = false;
+            idsSelect.options[0].text = "Select IDS file for Validation...";
+            createSearchableSelect(idsSelect);
         })
         .catch(error => console.error("Error fetching ids documents:", error));
 
@@ -30,8 +32,10 @@ document.addEventListener('DOMContentLoaded', function() {
         .then(response => JSON.parse(response))
         .then(ifcDocuments => populateSelectElement(ifcDocuments, 'ifc_filename'))
         .then(() => {
-          document.querySelector('select[name="ifc_filename"]').disabled = false;
-          document.querySelector('select[name="ifc_filename"]').options[0].text = "Select IFC file for Validation...";
+            const ifcSelect = document.querySelector('select[name="ifc_filename"]');
+            ifcSelect.disabled = false;
+            ifcSelect.options[0].text = "Select IFC file for Validation...";
+            createSearchableSelect(ifcSelect);
         })
         .catch(error => console.error("Error fetching documents:", error));
 
@@ -81,6 +85,67 @@ function populateSelectElement(json, selectName) {
   });
 }
 
+function createSearchableSelect(selectElement) {
+    const container = document.createElement('div');
+    container.className = 'searchable-select-container';
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'searchable-select';
+    wrapper.innerHTML = selectElement.options[selectElement.selectedIndex].text;
+
+    const dropdown = document.createElement('div');
+    dropdown.className = 'searchable-select-dropdown';
+
+    const searchInput = document.createElement('input');
+    searchInput.type = 'text';
+    searchInput.className = 'searchable-select-search';
+    searchInput.placeholder = 'Search...';
+
+    dropdown.appendChild(searchInput);
+
+    Array.from(selectElement.options).forEach((option, index) => {
+        if (index === 0) return; // Skip the first option
+        const div = document.createElement('div');
+        div.textContent = option.text;
+        div.dataset.value = option.value;
+        dropdown.appendChild(div);
+    });
+
+    container.appendChild(wrapper);
+    container.appendChild(dropdown);
+
+    selectElement.style.display = 'none';
+    selectElement.parentNode.insertBefore(container, selectElement);
+
+    wrapper.addEventListener('click', () => {
+        dropdown.style.display = dropdown.style.display === 'block' ? 'none' : 'block';
+        searchInput.focus();
+    });
+
+    searchInput.addEventListener('input', () => {
+        const filter = searchInput.value.toLowerCase();
+        Array.from(dropdown.children).forEach(child => {
+            if (child.tagName === 'DIV') {
+                child.style.display = child.textContent.toLowerCase().includes(filter) ? '' : 'none';
+            }
+        });
+    });
+
+    dropdown.addEventListener('click', (event) => {
+        if (event.target.tagName === 'DIV') {
+            selectElement.value = event.target.dataset.value;
+            wrapper.innerHTML = event.target.textContent;
+            dropdown.style.display = 'none';
+            selectElement.dispatchEvent(new Event('change'));
+        }
+    });
+
+    document.addEventListener('click', (event) => {
+        if (!container.contains(event.target)) {
+            dropdown.style.display = 'none';
+        }
+    });
+}
 
 document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('validate').addEventListener('click', function() {
