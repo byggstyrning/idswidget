@@ -19,7 +19,7 @@ The IDS Widget is a FastHTML application that provides functionality for validat
 
 ## Features
 
-- IFC file selection from uploaded StreamBIM documents and validation against IDS specifications
+- IFC and IDS selection from uploaded StreamBIM documents and validation.
 - JSON and HTML report generation
 - Integration with StreamBIM for 3D model visualization
 - Highlighting of failed entities in the 3D model
