@@ -14,6 +14,7 @@ services:
     volumes:
       - ./shared/uploads:/app/uploads
       - ./shared/output:/app/output
+    restart: unless-stopped
 
   ifctester:
     build:
@@ -24,3 +25,4 @@ services:
     volumes:
       - ./shared/uploads:/app/uploads
       - ./shared/output:/app/output
+    restart: unless-stopped
