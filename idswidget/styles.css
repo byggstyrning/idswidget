@@ -247,6 +247,44 @@ div#loading-indicator {
     font-style: italic;
     padding: 2em;
 }
+
+/* WASM Loading Progress Styles */
+.wasm-loading {
+    max-width: 400px;
+    margin: 0 auto;
+    padding: 20px;
+}
+
+#wasm-progress-text {
+    margin-bottom: 10px;
+    font-size: 0.95em;
+    color: #fff;
+}
+
+.progress-container {
+    background-color: rgba(0, 0, 0, 0.5);
+    border-radius: 10px;
+    height: 20px;
+    overflow: hidden;
+    position: relative;
+}
+
+.progress-bar {
+    background: linear-gradient(90deg, var(--streambim-orange), var(--streambim-orange-dark));
+    height: 100%;
+    width: 0%;
+    border-radius: 10px;
+    transition: width 0.3s ease-out;
+}
+
+.error {
+    background-color: rgba(218, 12, 12, 0.3);
+    color: #ff5f5f;
+    padding: 15px;
+    border-radius: 5px;
+    font-weight: bold;
+    text-align: center;
+}
 section {
     border: unset !important;
     border-radius: 5px;

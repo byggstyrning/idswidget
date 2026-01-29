@@ -5,9 +5,6 @@ WORKDIR /app
 # Install curl for downloading files
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 
-COPY shared /app/shared
-RUN pip install -e /app/shared
-
 COPY idswidget/ .
 RUN pip install -r requirements.txt
 

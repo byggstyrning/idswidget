@@ -1,0 +1,7 @@
+{
+    "wasm": {
+        "pyodide_url": "https://cdn.jsdelivr.net/pyodide/v0.27.0/full/",
+        "wheel_url": "https://github.com/AECgeeks/ifcopenshell-wasm/releases/download/v0.8.0/ifcopenshell-0.8.0-cp312-cp312-pyodide_2024_0_wasm32.whl",
+        "odfpy_url": "https://files.pythonhosted.org/packages/py2.py3/o/odfpy/odfpy-1.4.2-py2.py3-none-any.whl"
+    }
+}
