@@ -2,5 +2,14 @@
 
 .cursor/
 
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# FastHTML session key
+.sesskey
+
 /shared/uploads/*
 !/shared/uploads/.gitkeep

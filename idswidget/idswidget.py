@@ -17,12 +17,15 @@ import json
 
 logger = logging.getLogger(__name__)
 
+# Cache-busting timestamp - generated once at module load
+CACHE_BUST = int(time.time())
+
 # Define default headers for the HTML output
 hdrs = (  
-    Link(rel="stylesheet", href=f"/styles.css?t={int(time.time())}"),
+    Link(rel="stylesheet", href=f"/styles.css?t={CACHE_BUST}"),
     Link(rel="stylesheet", href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.1.1/css/all.min.css"),
     Script(src="https://cdnjs.cloudflare.com/ajax/libs/handlebars.js/4.7.7/handlebars.min.js"),
-    Script(src=f"/js/streambim-widget-api.min.js?t={int(time.time())}"),
+    Script(src=f"/js/streambim-widget-api.min.js?t={CACHE_BUST}"),
     # Connect to StreamBIM IMMEDIATELY with inline sync script (before ES module loads)
     # Using the OLD v2 API: connect() instead of connectToParent()
     # This matches the Penpal version used by StreamBIM's production app
@@ -38,7 +41,7 @@ hdrs = (
         }
     """),
     # Load main widget script as ES module for WASM support
-    Script(src=f"/js/ids-widget.js?t={int(time.time())}", type="module"),
+    Script(src=f"/js/ids-widget.js?t={CACHE_BUST}", type="module"),
     Meta(charset="utf-8"),
 )
 
