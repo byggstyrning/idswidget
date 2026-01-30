@@ -21,6 +21,51 @@ let pyodide = null;
 let ready = false;
 let CONFIG = null;
 
+// Cache name for wheels - version is appended from config
+const WHEEL_CACHE_PREFIX = 'ids-widget-wheels-';
+
+/**
+ * Get wheel data from cache or fetch from network
+ * Uses Cache API for persistent browser storage
+ */
+async function getCachedOrFetchWheel(url, cacheVersion = 'v1') {
+    const cacheName = `${WHEEL_CACHE_PREFIX}${cacheVersion}`;
+    
+    try {
+        const cache = await caches.open(cacheName);
+        const cached = await cache.match(url);
+        
+        if (cached) {
+            console.log('[worker] Using cached wheel:', url);
+            return cached.arrayBuffer();
+        }
+        
+        console.log('[worker] Fetching wheel (not in cache):', url);
+        const response = await fetch(url);
+        
+        if (!response.ok) {
+            throw new Error(`Failed to fetch wheel: ${response.status} ${response.statusText}`);
+        }
+        
+        // Clone response before consuming it (can only read body once)
+        const responseClone = response.clone();
+        
+        // Store in cache for future use
+        await cache.put(url, responseClone);
+        console.log('[worker] Wheel cached:', url);
+        
+        return response.arrayBuffer();
+    } catch (e) {
+        // If cache fails (e.g., in private browsing), fall back to direct fetch
+        console.warn('[worker] Cache API unavailable, fetching directly:', e.message);
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`Failed to fetch wheel: ${response.status} ${response.statusText}`);
+        }
+        return response.arrayBuffer();
+    }
+}
+
 // Load configuration
 async function loadConfig() {
     if (CONFIG) return CONFIG;
@@ -116,23 +161,64 @@ async function initEnvironment() {
 
     sendProgress('Installing IfcOpenShell (this may take a moment)...', 50);
     
-    // Install IfcOpenShell wheel
+    // Install wheels from local server (downloaded during Docker build)
+    // Config now contains local paths like /wheels/ifcopenshell-xxx.whl
+    // Wheels are cached in browser using Cache API for faster repeat visits
+    const origin = self.location.origin;
+    const cacheVersion = CONFIG.cache_version || 'v1';
+    
     try {
-        await micropip.install(CONFIG.wheel_url);
+        // Build the full URL for the wheel (config has relative path like /wheels/...)
+        const wheelUrl = CONFIG.wheel_url.startsWith('http') 
+            ? CONFIG.wheel_url 
+            : `${origin}${CONFIG.wheel_url}`;
+        
+        // Get wheel from cache or fetch (with automatic caching)
+        const wheelData = await getCachedOrFetchWheel(wheelUrl, cacheVersion);
+        console.log('[worker] ifcopenshell wheel ready:', wheelData.byteLength, 'bytes');
+        
+        // Extract wheel filename from URL
+        const wheelFilename = CONFIG.wheel_url.split('/').pop();
+        const wheelPath = `/tmp/${wheelFilename}`;
+        
+        // Write wheel to Pyodide's virtual filesystem
+        pyodide.FS.writeFile(wheelPath, new Uint8Array(wheelData));
+        console.log('[worker] Wheel saved to:', wheelPath);
+        
+        // Install from emfs:// path
+        await micropip.install(`emfs:${wheelPath}`);
+        console.log('[worker] ifcopenshell installed successfully');
     } catch (e) {
-        console.warn('[worker] Failed to install wheel from URL, trying PyPI...', e);
-        // Fallback to PyPI if the wheel URL fails
-        await micropip.install('ifcopenshell');
+        console.error('[worker] Failed to install ifcopenshell wheel:', e);
+        throw new Error('Failed to install ifcopenshell. PyPI does not have a Pyodide-compatible wheel.');
     }
 
     sendProgress('Installing ifctester dependencies...', 70);
     
-    // Install odfpy (required by ifctester)
+    // Install odfpy from local wheel (PyPI doesn't have a pure Python wheel)
     try {
-        await micropip.install(CONFIG.odfpy_url);
+        const odfpyUrl = CONFIG.odfpy_url.startsWith('http')
+            ? CONFIG.odfpy_url
+            : `${origin}${CONFIG.odfpy_url}`;
+        
+        // Get wheel from cache or fetch (with automatic caching)
+        const odfpyData = await getCachedOrFetchWheel(odfpyUrl, cacheVersion);
+        console.log('[worker] odfpy wheel ready:', odfpyData.byteLength, 'bytes');
+        
+        // Extract wheel filename from URL
+        const odfpyFilename = CONFIG.odfpy_url.split('/').pop();
+        const odfpyPath = `/tmp/${odfpyFilename}`;
+        
+        // Write wheel to Pyodide's virtual filesystem
+        pyodide.FS.writeFile(odfpyPath, new Uint8Array(odfpyData));
+        console.log('[worker] odfpy wheel saved to:', odfpyPath);
+        
+        // Install from emfs:// path
+        await micropip.install(`emfs:${odfpyPath}`);
+        console.log('[worker] odfpy installed successfully');
     } catch (e) {
-        console.warn('[worker] Failed to install odfpy from URL, trying PyPI...', e);
-        await micropip.install('odfpy');
+        console.warn('[worker] Failed to install odfpy:', e);
+        // odfpy is optional, ifctester can work without it (just no ODF reports)
     }
 
     sendProgress('Installing ifctester...', 80);
@@ -191,16 +277,21 @@ import json
 
             pyodide.FS.writeFile(path, new Uint8Array(ifcData));
 
-            const ifc = await pyodide.runPythonAsync(`
+            // Load IFC and get schema info
+            const result = await pyodide.runPythonAsync(`
+import json
 import ifcopenshell
 ifc = ifcopenshell.open("${path}")
-ifc
+json.dumps({"schema": ifc.schema})
             `);
-
-            LoadedIFC.set(ifcId, ifc);
-            console.log("[api] Loaded IFC file:", ifcId);
             
-            return ifcId;
+            const parsed = JSON.parse(result);
+            const ifcSchema = parsed.schema;
+
+            LoadedIFC.set(ifcId, { schema: ifcSchema });
+            console.log("[api] Loaded IFC file:", ifcId, "schema:", ifcSchema);
+            
+            return { ifcId, schema: ifcSchema };
         },
 
         async unloadIfc(ifcId) {
@@ -216,10 +307,123 @@ ifc
             console.log("[api] Unloaded IFC file:", ifcId);
         },
 
-        async auditIfc(ifcId, idsData) {
-            const ifc = LoadedIFC.get(ifcId);
+        /**
+         * Pre-validate IDS against an IFC schema before running full validation.
+         * This catches schema mismatches early and prevents Pyodide crashes.
+         */
+        async preValidateIds(idsData, ifcSchema) {
+            const idsString = new TextDecoder().decode(new Uint8Array(idsData));
+            const tempIdsPath = `/tmp/prevalidate_${Date.now()}.ids`;
+            pyodide.FS.writeFile(tempIdsPath, idsString);
+
+            const result = await pyodide.runPythonAsync(`
+import json
+from ifctester import ids
+from ifctester.facet import Entity
+import ifcopenshell
+
+result = None
+ids_path = "${tempIdsPath}"
+ifc_schema = "${ifcSchema}"
+
+try:
+    # Load and parse IDS file
+    my_ids = ids.open(ids_path)
+    
+    # Extract all entity types referenced in the IDS
+    def extract_value(restriction):
+        """Extract string values from IDS restriction"""
+        values = set()
+        if restriction is None:
+            return values
+        if isinstance(restriction, str):
+            values.add(restriction.upper())
+        elif isinstance(restriction, list):
+            for item in restriction:
+                values.update(extract_value(item))
+        elif hasattr(restriction, 'options'):
+            for opt in restriction.options:
+                values.add(str(opt).upper())
+        elif hasattr(restriction, 'value'):
+            values.add(str(restriction.value).upper())
+        else:
+            try:
+                values.add(str(restriction).upper())
+            except:
+                pass
+        return values
+
+    def get_ids_entity_types(ids_obj):
+        """Extract all entity type names referenced in IDS specifications"""
+        entity_types = set()
+        for spec in ids_obj.specifications:
+            if hasattr(spec, 'applicability') and spec.applicability:
+                for facet in spec.applicability:
+                    if isinstance(facet, Entity):
+                        if hasattr(facet, 'name') and facet.name:
+                            entity_types.update(extract_value(facet.name))
+            if hasattr(spec, 'requirements') and spec.requirements:
+                for facet in spec.requirements:
+                    if isinstance(facet, Entity):
+                        if hasattr(facet, 'name') and facet.name:
+                            entity_types.update(extract_value(facet.name))
+        return entity_types
+
+    # Check entity types against schema
+    schema = ifcopenshell.ifcopenshell_wrapper.schema_by_name(ifc_schema)
+    ids_entity_types = get_ids_entity_types(my_ids)
+    invalid_types = []
+    
+    for entity_type in ids_entity_types:
+        try:
+            schema.declaration_by_name(entity_type)
+        except:
+            invalid_types.append(entity_type)
+    
+    if invalid_types:
+        result = {
+            "valid": False,
+            "error": f"The IDS file references entity types not available in the IFC schema ({ifc_schema}): {', '.join(sorted(invalid_types))}. The IDS may be designed for a different IFC version (e.g., IFC4 vs IFC2X3).",
+            "specifications_count": len(my_ids.specifications),
+            "entity_types": list(ids_entity_types),
+            "invalid_types": invalid_types
+        }
+    else:
+        result = {
+            "valid": True,
+            "specifications_count": len(my_ids.specifications),
+            "entity_types": list(ids_entity_types),
+            "invalid_types": []
+        }
+except Exception as e:
+    result = {
+        "valid": False,
+        "error": f"Failed to parse IDS file: {str(e)}",
+        "specifications_count": 0,
+        "entity_types": [],
+        "invalid_types": []
+    }
+
+json.dumps(result)
+            `);
+
+            // Cleanup temp file
+            try {
+                pyodide.FS.unlink(tempIdsPath);
+            } catch (e) {}
+
+            const parsed = JSON.parse(result);
+            console.log("[api] Pre-validated IDS:", parsed.valid ? "OK" : "FAILED", 
+                        "specs:", parsed.specifications_count, 
+                        "entities:", parsed.entity_types?.length || 0);
             
-            if (!ifc) {
+            return parsed;
+        },
+
+        async auditIfc(ifcId, idsData, skipPreValidation = false) {
+            const ifcInfo = LoadedIFC.get(ifcId);
+            
+            if (!ifcInfo) {
                 throw new Error(`IFC file not found: ${ifcId}`);
             }
 
@@ -227,33 +431,47 @@ ifc
             const idsPath = `/tmp/${encodeURIComponent(ifcId)}.ids`;
             pyodide.FS.writeFile(idsPath, idsString);
 
+            // Run validation (pre-validation should have been done separately)
             const result = await pyodide.runPythonAsync(`
 import json
 from ifctester import ids, reporter
-
-my_ids = ids.open("${idsPath}")
-
 import ifcopenshell
+
+result = None
 ifc_path = "/tmp/${encodeURIComponent(ifcId)}.ifc"
-my_ifc = ifcopenshell.open(ifc_path)
+ids_path = "${idsPath}"
 
-my_ids.validate(my_ifc)
-
-json_reporter = reporter.Json(my_ids)
-json_reporter.report()
-json_report = json_reporter.to_string()
-
-total_specs = len(my_ids.specifications)
-passed_specs = sum(1 for spec in my_ids.specifications if spec.status)
-failed_specs = total_specs - passed_specs
-
-result = {
-    "success": True,
-    "total_specifications": total_specs,
-    "passed_specifications": passed_specs,
-    "failed_specifications": failed_specs,
-    "report": json_report
-}
+try:
+    my_ifc = ifcopenshell.open(ifc_path)
+    my_ids = ids.open(ids_path)
+    
+    my_ids.validate(my_ifc)
+    
+    json_reporter = reporter.Json(my_ids)
+    json_reporter.report()
+    json_report = json_reporter.to_string()
+    
+    total_specs = len(my_ids.specifications)
+    passed_specs = sum(1 for spec in my_ids.specifications if spec.status)
+    failed_specs = total_specs - passed_specs
+    
+    result = {
+        "success": True,
+        "total_specifications": total_specs,
+        "passed_specifications": passed_specs,
+        "failed_specifications": failed_specs,
+        "report": json_report
+    }
+except Exception as e:
+    error_msg = str(e)
+    result = {
+        "success": False,
+        "error": f"Validation error: {error_msg}",
+        "total_specifications": 0,
+        "passed_specifications": 0,
+        "failed_specifications": 0,
+        "report": None
+    }
 
 json.dumps(result)
             `);
@@ -265,6 +483,12 @@ json.dumps(result)
             }
 
             const parsed = JSON.parse(result);
+            
+            if (!parsed.success) {
+                console.error("[api] Validation error:", parsed.error);
+                throw new Error(parsed.error);
+            }
+            
             console.log("[api] Validation complete:", {
                 total: parsed.total_specifications,
                 passed: parsed.passed_specifications,

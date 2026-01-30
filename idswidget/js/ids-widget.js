@@ -10,8 +10,270 @@ var projectID = '';
 var wasmInitialized = false;
 var wasmInitializing = false;
 
+// Cache name for IFC/IDS files
+const FILE_CACHE_NAME = 'ids-widget-files-v1';
+
+// Pending downloads (started when user selects files)
+let pendingIfcDownload = null;
+let pendingIdsDownload = null;
+
+// Store selected file metadata for cache keys
+let selectedIfcMeta = null;
+let selectedIdsMeta = null;
+
 /**
- * Initialize the WASM module with progress feedback
+ * Generate cache key from StreamBIM file metadata
+ * Key format: file_{documentId}_{revisionId}_{uploadDate}
+ */
+function getFileCacheKey(documentId, revisionId, uploadDate) {
+    // Sanitize uploadDate to be URL-safe
+    const safeUploadDate = uploadDate ? uploadDate.replace(/[^a-zA-Z0-9-_]/g, '_') : 'unknown';
+    return `file_${documentId}_${revisionId || 'none'}_${safeUploadDate}`;
+}
+
+/**
+ * Download file with caching - uses StreamBIM metadata to detect changes
+ */
+async function downloadFileWithCache(downloadLink, documentId, revisionId, uploadDate) {
+    const cacheKey = getFileCacheKey(documentId, revisionId, uploadDate);
+    
+    try {
+        const cache = await caches.open(FILE_CACHE_NAME);
+        
+        // Check if we have this exact version cached
+        const cached = await cache.match(cacheKey);
+        if (cached) {
+            console.log('[IDS Widget] Using cached file:', cacheKey);
+            return cached.arrayBuffer();
+        }
+        
+        // Download fresh copy
+        console.log('[IDS Widget] Downloading file (not cached):', downloadLink);
+        const data = await downloadFile(downloadLink);
+        
+        // Cache the response for future use
+        const response = new Response(data, {
+            headers: { 
+                'Content-Type': 'application/octet-stream',
+                'X-Cache-Key': cacheKey,
+                'X-Cached-At': new Date().toISOString()
+            }
+        });
+        await cache.put(cacheKey, response);
+        console.log('[IDS Widget] File cached:', cacheKey);
+        
+        return data;
+    } catch (e) {
+        // If cache fails (e.g., private browsing), fall back to direct download
+        console.warn('[IDS Widget] Cache unavailable, downloading directly:', e.message);
+        return downloadFile(downloadLink);
+    }
+}
+
+// Use the connection established by the inline sync script in idswidget.py
+// ES modules are deferred, so we can't call connect() here (too late)
+// Using v2 API: StreamBIM.methodName() instead of StreamBIM.methodName()
+console.log("IDS Widget loaded (WASM version)");
+
+// Start WASM initialization immediately in the background
+// This runs while the user selects files, significantly reducing wait time on validate
+let wasmInitPromise = null;
+
+function startEarlyWasmInit() {
+    if (!wasmInitPromise && !wasmInitialized) {
+        console.log('[IDS Widget] Starting early WASM initialization in background...');
+        wasmInitPromise = initializeWasm().then(() => {
+            console.log('[IDS Widget] Background WASM init complete!');
+            return true;
+        }).catch(err => {
+            console.warn('[IDS Widget] Background WASM init failed:', err.message);
+            wasmInitPromise = null; // Allow retry on validate
+            return false;
+        });
+    }
+    return wasmInitPromise;
+}
+
+// Start initialization immediately on module load
+startEarlyWasmInit();
+
+// Use the early connection established by sync script, or fall back to new connection (v2 API)
+const connectPromise = window._streamBIMConnection || StreamBIM.connect({});
+
+connectPromise.then(function() {
+    console.log("StreamBIM connected (module)");
+    initializeWidget();
+}).catch(function(error) {
+    console.error("Failed to connect to StreamBIM:", error);
+});
+
+/**
+ * Initialize the widget after StreamBIM connection is established
+ */
+function initializeWidget() {
+    // Set StreamBIM styles
+    StreamBIM.setStyles(".color-code-values--left-sliders-active {margin-left: 40%;}");
+    
+    // Get project ID and load files
+    StreamBIM.getProjectId().then((result) => {
+        projectID = result;
+        loadFileSelectors();
+        setupClickHandlers();
+        setupValidateButton();
+        setupFileSelectionHandlers();
+    }).catch((error) => console.error("Error getting project ID:", error));
+}
+
+/**
+ * Setup handlers for file selection changes
+ */
+function setupFileSelectionHandlers() {
+    const ifcSelect = document.querySelector('select[name="ifc_filename"]');
+    const idsSelect = document.querySelector('select[name="ids_filename"]');
+    
+    if (ifcSelect) {
+        ifcSelect.addEventListener('change', onIfcSelected);
+    }
+    
+    if (idsSelect) {
+        idsSelect.addEventListener('change', onIdsSelected);
+    }
+}
+
+/**
+ * Handle IFC file selection - start fetching in background
+ */
+async function onIfcSelected(event) {
+    const select = event.target;
+    const selectedOption = select.options[select.selectedIndex];
+    
+    if (!selectedOption || !selectedOption.value) {
+        pendingIfcDownload = null;
+        selectedIfcMeta = null;
+        return;
+    }
+    
+    const documentId = selectedOption.value;
+    const revisionId = selectedOption.dataset.revId || null;
+    const uploadDate = selectedOption.dataset.uploadDate || null;
+    
+    // Store metadata for cache key
+    selectedIfcMeta = { documentId, revisionId, uploadDate };
+    
+    console.log('[IDS Widget] IFC selected:', selectedOption.text);
+    
+    // Start fetching in background (will use cache if available)
+    pendingIfcDownload = (async () => {
+        try {
+            const downloadLink = await StreamBIM.makeApiRequest({ 
+                url: `https://app.streambim.com/project-${projectID}/api/v1/documents/${documentId}/downloadlink` 
+            });
+            return downloadFileWithCache(downloadLink, documentId, revisionId, uploadDate);
+        } catch (e) {
+            console.warn('[IDS Widget] Background IFC fetch failed:', e.message);
+            return null;
+        }
+    })();
+}
+
+/**
+ * Handle IDS file selection - start fetching in background
+ */
+async function onIdsSelected(event) {
+    const select = event.target;
+    const selectedOption = select.options[select.selectedIndex];
+    
+    if (!selectedOption || !selectedOption.value) {
+        pendingIdsDownload = null;
+        selectedIdsMeta = null;
+        return;
+    }
+    
+    const documentId = selectedOption.value;
+    const revisionId = selectedOption.dataset.revId || null;
+    const uploadDate = selectedOption.dataset.uploadDate || null;
+    
+    // Store metadata for cache key
+    selectedIdsMeta = { documentId, revisionId, uploadDate };
+    
+    console.log('[IDS Widget] IDS selected:', selectedOption.text);
+    
+    // Start fetching in background (will use cache if available)
+    pendingIdsDownload = (async () => {
+        try {
+            const downloadLink = await StreamBIM.makeApiRequest({ 
+                url: `https://app.streambim.com/project-${projectID}/api/v1/documents/${documentId}/downloadlink` 
+            });
+            return downloadFileWithCache(downloadLink, documentId, revisionId, uploadDate);
+        } catch (e) {
+            console.warn('[IDS Widget] Background IDS fetch failed:', e.message);
+            return null;
+        }
+    })();
+}
+
+/**
+ * Load the IFC and IDS file selectors
+ */
+function loadFileSelectors() {
+    const queryIds = { filter: { freetext: ".ids", isDeleted: false } };
+    const base64queryIds = btoa(JSON.stringify(queryIds));
+    
+    StreamBIM.makeApiRequest({url: `https://app.streambim.com/project-${projectID}/api/v1/documents/export/json/?query=${base64queryIds}`})
+    .then(response => JSON.parse(response))
+    .then(idsDocuments => populateSelectElement(idsDocuments, 'ids_filename'))
+    .then(() => {
+        const idsSelect = document.querySelector('select[name="ids_filename"]');
+        if (idsSelect) {
+            idsSelect.disabled = false;
+            idsSelect.options[0].text = "Select IDS file for Validation...";
+            createSearchableSelect(idsSelect);
+        }
+    })
+    .catch(error => console.error("Error fetching ids documents:", error));
+
+    const queryIfc = { filter: { freetext: ".ifc", isDeleted: false } };
+    const base64queryIfc = btoa(JSON.stringify(queryIfc));
+    
+    StreamBIM.makeApiRequest({url: `https://app.streambim.com/project-${projectID}/api/v1/documents/export/json/?query=${base64queryIfc}`})
+    .then(response => JSON.parse(response))
+    .then(ifcDocuments => populateSelectElement(ifcDocuments, 'ifc_filename'))
+    .then(() => {
+        const ifcSelect = document.querySelector('select[name="ifc_filename"]');
+        if (ifcSelect) {
+            ifcSelect.disabled = false;
+            ifcSelect.options[0].text = "Select IFC file for Validation...";
+            createSearchableSelect(ifcSelect);
+        }
+    })
+    .catch(error => console.error("Error fetching documents:", error));
+}
+
+/**
+ * Setup click handlers for report interactions
+ */
+function setupClickHandlers() {
+    document.addEventListener("click", function(event) {
+        if (event.target.classList.contains("goto-btn")) {
+            gotoObject(event.target.dataset.guid);
+        } else if (event.target.classList.contains("highlight") && event.target.classList.contains("element")) {
+            highlightObject(event.target.dataset.guid);
+        } else if (event.target.classList.contains("highlight") && event.target.classList.contains("grouped_clashes")) {
+            highlightGroup(event.target.dataset.groupIndex);
+        } else if (event.target.classList.contains("highlight") && event.target.classList.contains("model_clashes")) {
+            highlightModelClashes(event.target.dataset.groupIndex);
+        } else if (event.target.classList.contains("highlight") && event.target.classList.contains("failed_entities")) {
+            highlightFailedEntities(event.target.dataset.specIndex, event.target.dataset.reqIndex);
+        } else if (event.target.classList.contains("copy-btn")) {
+            copyToClipboard(event.target);
+        } else if (event.target.classList.contains("copy-btn") && event.target.classList.contains("failed_entities")) {
+            copyToClipboardEntities(event.target, event.target.dataset.specIndex, event.target.dataset.reqIndex);
+        }
+    });
+}
+
+/**
+ * Initialize the WASM module
  */
 async function initializeWasm() {
     if (wasmInitialized) return true;
@@ -24,20 +286,10 @@ async function initializeWasm() {
     }
 
     wasmInitializing = true;
-    
-    const loadingIndicator = document.getElementById('loading-indicator');
-    const progressBar = document.getElementById('wasm-progress');
-    const progressText = document.getElementById('wasm-progress-text');
 
     try {
         await wasm.init((progress) => {
-            console.log('[WASM Progress]', progress.message, progress.percent);
-            if (progressText) {
-                progressText.textContent = progress.message || 'Initializing...';
-            }
-            if (progressBar && progress.percent !== null) {
-                progressBar.style.width = `${progress.percent}%`;
-            }
+            console.log('[WASM]', progress.message, progress.percent);
         });
         
         wasmInitialized = true;
@@ -45,6 +297,7 @@ async function initializeWasm() {
         return true;
     } catch (error) {
         console.error('[IDS Widget] Failed to initialize WASM:', error);
+        const loadingIndicator = document.getElementById('loading-indicator');
         if (loadingIndicator) {
             loadingIndicator.innerHTML = `<div class="error">Failed to initialize validation engine: ${error.message}</div>`;
         }
@@ -56,13 +309,15 @@ async function initializeWasm() {
 
 /**
  * Download a file from StreamBIM as ArrayBuffer
+ * Uses server-side proxy to avoid CORS issues
  */
 async function downloadFile(downloadLink) {
     const fullUrl = `https://app.streambim.com/project-${projectID}/api/v1/${downloadLink}`;
     
-    // Use StreamBIM API to make the request (handles authentication)
-    const response = await fetch(fullUrl, {
-        credentials: 'include'
+    // Use proxy endpoint to avoid CORS issues
+    // Cookies are automatically forwarded by the browser
+    const response = await fetch(`/proxy/download?url=${encodeURIComponent(fullUrl)}`, {
+        credentials: 'include' // Include cookies so server can forward them
     });
     
     if (!response.ok) {
@@ -79,12 +334,32 @@ async function validateWithWasm(ifcData, idsData) {
     // Ensure WASM is initialized
     await initializeWasm();
     
-    // Load IFC file
-    const ifcId = await wasm.loadIfc(ifcData);
-    console.log('[IDS Widget] IFC loaded with ID:', ifcId);
+    // Load IFC file and get schema info
+    const loadResult = await wasm.loadIfc(ifcData);
+    const ifcId = loadResult.ifcId;
+    const ifcSchema = loadResult.schema;
+    console.log('[IDS Widget] IFC loaded with ID:', ifcId, 'schema:', ifcSchema);
     
     try {
-        // Run validation
+        // Pre-validate IDS against IFC schema before running full validation
+        // This catches schema mismatches early and prevents Pyodide crashes
+        const preValidation = await wasm.preValidateIds(idsData, ifcSchema);
+        
+        if (!preValidation.valid) {
+            console.error('[IDS Widget] IDS pre-validation failed:', preValidation.error);
+            return {
+                success: false,
+                error: preValidation.error,
+                total_specifications: 0,
+                passed_specifications: 0,
+                failed_specifications: 0,
+                report: null
+            };
+        }
+        
+        console.log('[IDS Widget] IDS pre-validation passed, specs:', preValidation.specifications_count);
+        
+        // Run full validation
         const result = await wasm.auditIfc(ifcId, idsData);
         console.log('[IDS Widget] Validation complete:', result);
         return result;
@@ -94,64 +369,15 @@ async function validateWithWasm(ifcData, idsData) {
     }
 }
 
-document.addEventListener('DOMContentLoaded', function() {
-    console.log("IDS Widget loaded (WASM version)");
-
-    StreamBIM.connect().then(function () {
-        console.log("StreamBIM connected");
-        StreamBIM.setStyles(".color-code-values--left-sliders-active {margin-left: 40%;}");
-        
-        StreamBIM.getProjectId().then((result) => {
-            projectID = result;
-            const queryIds = { filter: { freetext: ".ids", isDeleted: false } };
-            const base64queryIds = btoa(JSON.stringify(queryIds));
-            
-            StreamBIM.makeApiRequest({url: `https://app.streambim.com/project-${projectID}/api/v1/documents/export/json/?query=${base64queryIds}`})
-            .then(response => JSON.parse(response))
-            .then(idsDocuments => populateSelectElement(idsDocuments, 'ids_filename'))
-            .then(() => {
-                const idsSelect = document.querySelector('select[name="ids_filename"]');
-                idsSelect.disabled = false;
-                idsSelect.options[0].text = "Select IDS file for Validation...";
-                createSearchableSelect(idsSelect);
-            })
-            .catch(error => console.error("Error fetching ids documents:", error));
-
-            const queryIfc = { filter: { freetext: ".ifc", isDeleted: false } };
-            const base64queryIfc = btoa(JSON.stringify(queryIfc));
-            
-            StreamBIM.makeApiRequest({url: `https://app.streambim.com/project-${projectID}/api/v1/documents/export/json/?query=${base64queryIfc}`})
-            .then(response => JSON.parse(response))
-            .then(ifcDocuments => populateSelectElement(ifcDocuments, 'ifc_filename'))
-            .then(() => {
-                const ifcSelect = document.querySelector('select[name="ifc_filename"]');
-                ifcSelect.disabled = false;
-                ifcSelect.options[0].text = "Select IFC file for Validation...";
-                createSearchableSelect(ifcSelect);
-            })
-            .catch(error => console.error("Error fetching documents:", error));
-
-            document.addEventListener("click", function(event) {
-                if (event.target.classList.contains("goto-btn")) {
-                    gotoObject(event.target.dataset.guid);
-                } else if (event.target.classList.contains("highlight") && event.target.classList.contains("element")) {
-                    highlightObject(event.target.dataset.guid);
-                } else if (event.target.classList.contains("highlight") && event.target.classList.contains("grouped_clashes")) {
-                    highlightGroup(event.target.dataset.groupIndex);
-                } else if (event.target.classList.contains("highlight") && event.target.classList.contains("model_clashes")) {
-                    highlightModelClashes(event.target.dataset.groupIndex);
-                } else if (event.target.classList.contains("highlight") && event.target.classList.contains("failed_entities")) {
-                    highlightFailedEntities(event.target.dataset.specIndex, event.target.dataset.reqIndex);
-                } else if (event.target.classList.contains("copy-btn")) {
-                    copyToClipboard(event.target);
-                } else if (event.target.classList.contains("copy-btn") && event.target.classList.contains("failed_entities")) {
-                    copyToClipboardEntities(event.target, event.target.dataset.specIndex, event.target.dataset.reqIndex);
-                }
-            });
-            
-        }).catch((error) => console.error(error));
-    }).catch((error) => console.error(error));
-});
+/**
+ * Setup the validate button click handler
+ */
+function setupValidateButton() {
+    const validateBtn = document.getElementById('validate');
+    if (validateBtn) {
+        validateBtn.addEventListener('click', handleValidateClick);
+    }
+}
 
 function populateSelectElement(json, selectName) {
     console.log(json);
@@ -239,99 +465,152 @@ function createSearchableSelect(selectElement) {
     });
 }
 
-document.addEventListener('DOMContentLoaded', function() {
-    document.getElementById('validate').addEventListener('click', async function() {
-        const ifcSelect = document.querySelector('select[name="ifc_filename"]');
-        const idsSelect = document.querySelector('select[name="ids_filename"]');
+/**
+ * Handle validate button click
+ */
+async function handleValidateClick() {
+    const ifcSelect = document.querySelector('select[name="ifc_filename"]');
+    const idsSelect = document.querySelector('select[name="ids_filename"]');
 
-        var documentIfcID = ifcSelect.value;
-        var documentIdsID = idsSelect.value;
-        var ifcFilename = ifcSelect.options[ifcSelect.selectedIndex].text;
+    var documentIfcID = ifcSelect.value;
+    var documentIdsID = idsSelect.value;
+    var ifcFilename = ifcSelect.options[ifcSelect.selectedIndex].text;
+    
+    // Get metadata for cache keys from selected options
+    const ifcOption = ifcSelect.options[ifcSelect.selectedIndex];
+    const idsOption = idsSelect.options[idsSelect.selectedIndex];
+    
+    const ifcMeta = {
+        documentId: documentIfcID,
+        revisionId: ifcOption.dataset.revId || null,
+        uploadDate: ifcOption.dataset.uploadDate || null
+    };
+    
+    const idsMeta = {
+        documentId: documentIdsID,
+        revisionId: idsOption.dataset.revId || null,
+        uploadDate: idsOption.dataset.uploadDate || null
+    };
 
-        // Disable the select elements while validating
-        ifcSelect.disabled = true;
-        idsSelect.disabled = true;
+    // Disable the select elements while validating
+    ifcSelect.disabled = true;
+    idsSelect.disabled = true;
 
-        // Clear the #report innerHTML
-        document.getElementById('report').innerHTML = '';
-        
-        // Show a loading indicator with progress
-        const loadingIndicator = document.createElement('div');
-        loadingIndicator.id = 'loading-indicator';
-        loadingIndicator.innerHTML = `
-            <div class="wasm-loading">
-                <div id="wasm-progress-text">Preparing validation...</div>
-                <div class="progress-container">
-                    <div id="wasm-progress" class="progress-bar"></div>
-                </div>
-            </div>
-        `;
-        document.querySelector('.file-selection-container').insertAdjacentElement('afterend', loadingIndicator);
+    // Clear the #report innerHTML
+    document.getElementById('report').innerHTML = '';
+    
+    // Show a simple loading spinner
+    const loadingIndicator = document.createElement('div');
+    loadingIndicator.id = 'loading-indicator';
+    loadingIndicator.innerHTML = `
+        <div class="wasm-loading">
+            <div class="spinner"></div>
+            <div id="wasm-progress-text">Validating...</div>
+        </div>
+    `;
+    document.querySelector('.file-selection-container').insertAdjacentElement('afterend', loadingIndicator);
 
-        try {
-            // Get download links from StreamBIM
+    try {
+        // Check if files are already being fetched from selection handlers
+        const usePendingIfc = pendingIfcDownload && 
+            selectedIfcMeta && 
+            selectedIfcMeta.documentId === documentIfcID;
+        const usePendingIds = pendingIdsDownload && 
+            selectedIdsMeta && 
+            selectedIdsMeta.documentId === documentIdsID;
+
+        // Get IFC data - use pending download if available, otherwise fetch with caching
+        let ifcData;
+        if (usePendingIfc) {
+            console.log('[IDS Widget] Using pending IFC download');
+            ifcData = await pendingIfcDownload;
+        }
+        if (!ifcData) {
             const downloadlinkIfc = await StreamBIM.makeApiRequest({ 
                 url: `https://app.streambim.com/project-${projectID}/api/v1/documents/${documentIfcID}/downloadlink` 
             });
+            ifcData = await downloadFileWithCache(downloadlinkIfc, ifcMeta.documentId, ifcMeta.revisionId, ifcMeta.uploadDate);
+        }
+        console.log('[IDS Widget] IFC file ready:', ifcFilename, ifcData.byteLength, 'bytes');
+
+        // Get IDS data - use pending download if available, otherwise fetch with caching
+        let idsData;
+        if (usePendingIds) {
+            console.log('[IDS Widget] Using pending IDS download');
+            idsData = await pendingIdsDownload;
+        }
+        if (!idsData) {
             const downloadlinkIds = await StreamBIM.makeApiRequest({ 
                 url: `https://app.streambim.com/project-${projectID}/api/v1/documents/${documentIdsID}/downloadlink` 
             });
+            idsData = await downloadFileWithCache(downloadlinkIds, idsMeta.documentId, idsMeta.revisionId, idsMeta.uploadDate);
+        }
+        console.log('[IDS Widget] IDS file ready:', idsData.byteLength, 'bytes');
 
-            // Update progress
-            document.getElementById('wasm-progress-text').textContent = 'Downloading IFC file...';
-            document.getElementById('wasm-progress').style.width = '5%';
+        // Perform WASM-based validation
+        const data = await validateWithWasm(ifcData, idsData);
 
-            // Download files
-            const ifcData = await downloadFile(downloadlinkIfc);
-            console.log('[IDS Widget] IFC file downloaded:', ifcFilename, ifcData.byteLength, 'bytes');
+        // Remove the loading indicator
+        loadingIndicator.remove();
+        ifcSelect.disabled = false;
+        idsSelect.disabled = false;
+
+        // Check if validation returned an error (e.g., schema mismatch)
+        if (data && data.success === false && data.error) {
+            console.error('[IDS Widget] Validation error:', data.error);
+            document.getElementById("report").innerHTML = `<div class="error">${data.error}</div>`;
+            return;
+        }
+
+        if (typeof data === 'object' && data.report) {
+            jsondata = JSON.parse(data.report);
             
-            document.getElementById('wasm-progress-text').textContent = 'Downloading IDS file...';
-            document.getElementById('wasm-progress').style.width = '10%';
+            // Determine the template to use based on the document name
+            let templateId = 'json-template-IDS';
 
-            const idsData = await downloadFile(downloadlinkIds);
-            console.log('[IDS Widget] IDS file downloaded:', idsData.byteLength, 'bytes');
+            // Use the determined template
+            const templateScript = document.getElementById(templateId).innerHTML;
+            const template = Handlebars.compile(templateScript);
+            const html = template(jsondata);
 
-            // Perform WASM-based validation
-            const data = await validateWithWasm(ifcData, idsData);
-
-            // Remove the loading indicator
-            loadingIndicator.remove();
-            ifcSelect.disabled = false;
-            idsSelect.disabled = false;
-
-            if (typeof data === 'object' && data.report) {
-                jsondata = JSON.parse(data.report);
-                
-                // Determine the template to use based on the document name
-                let templateId = 'json-template-IDS';
-
-                // Use the determined template
-                const templateScript = document.getElementById(templateId).innerHTML;
-                const template = Handlebars.compile(templateScript);
-                const html = template(jsondata);
-
-                document.getElementById("report").innerHTML = html;
-                
-                // Setup event handlers for expanding/collapsing details
-                setupDetailHandlers();
+            document.getElementById("report").innerHTML = html;
+            
+            // Setup event handlers for expanding/collapsing details
+            setupDetailHandlers();
+        } else {
+            console.log("Data received not in expected format:", data);
+            document.getElementById("report").innerHTML = `<div class="error">Unexpected response format</div>`;
+        }
+    } catch (error) {
+        console.error('[IDS Widget] Validation error:', error);
+        
+        // Update loading indicator to show error
+        const loadingIndicator = document.getElementById('loading-indicator');
+        if (loadingIndicator) {
+            // Check if this is a fatal Pyodide error that requires reload
+            const isFatalError = error.message && (
+                error.message.includes('fatally failed') ||
+                error.message.includes('fatal error') ||
+                error.message.includes('can no longer be used')
+            );
+            
+            if (isFatalError) {
+                // Show reload prompt for fatal errors
+                loadingIndicator.innerHTML = `
+                    <div class="error">
+                        <p>The validation engine encountered an error and needs to be restarted.</p>
+                        <button onclick="location.reload()" class="reload-button">Reload Widget</button>
+                    </div>`;
             } else {
-                console.log("Data received not in expected format:", data);
-                document.getElementById("report").innerHTML = `<div class="error">Unexpected response format</div>`;
-            }
-        } catch (error) {
-            console.error('[IDS Widget] Validation error:', error);
-            
-            // Update loading indicator to show error
-            const loadingIndicator = document.getElementById('loading-indicator');
-            if (loadingIndicator) {
+                // Show the actual error message for recoverable errors
                 loadingIndicator.innerHTML = `<div class="error">Validation failed: ${error.message}</div>`;
             }
-            
-            ifcSelect.disabled = false;
-            idsSelect.disabled = false;
         }
-    });
-});
+        
+        ifcSelect.disabled = false;
+        idsSelect.disabled = false;
+    }
+}
 
 /**
  * Setup event handlers for expanding/collapsing requirement details
@@ -340,25 +619,29 @@ function setupDetailHandlers() {
     document.addEventListener("click", function(event) {
         if (event.target.classList.contains("summary-toggle")) {
             var detailsElement = event.target.closest('details');
+            var reqIndex = event.target.dataset.reqIndex;
+            var specIndex = event.target.dataset.specIndex;
+            
+            var tableContainer = document.getElementById('table-container-' + specIndex + '-' + reqIndex);
+            if (!tableContainer) return;
         
-            if (detailsElement.hasAttribute('open')) {
+            if (detailsElement && detailsElement.hasAttribute('open')) {
                 // If details are open, clear the content and close the details
-                var reqIndex = event.target.dataset.reqIndex;
-                var specIndex = event.target.dataset.specIndex;
-                document.getElementById('table-container-' + specIndex + '-' + reqIndex).innerHTML = '';
+                tableContainer.innerHTML = '';
                 const loadMoreBtn = document.querySelector('.load-more[data-spec-index="' + specIndex + '"][data-req-index="' + reqIndex + '"]');
                 if (loadMoreBtn) loadMoreBtn.style.display = 'none';
             } else {
                 // If details are closed, load content
-                var reqIndex = event.target.dataset.reqIndex;
-                var specIndex = event.target.dataset.specIndex;
-                var context = jsondata.specifications[specIndex].requirements[reqIndex];
-                var templateScript = document.getElementById('json-template-IDS-requirement').innerHTML;
+                var context = jsondata.specifications[specIndex]?.requirements[reqIndex];
+                if (!context || !context.failed_entities) return;
+                
+                var templateScript = document.getElementById('json-template-IDS-requirement')?.innerHTML;
+                if (!templateScript) return;
+                
                 var template = Handlebars.compile(templateScript);
-        
                 var initialRows = context.failed_entities.slice(0, 100);
                 var html = template({failed_entities: initialRows});
-                document.getElementById('table-container-' + specIndex + '-' + reqIndex).innerHTML = html;
+                tableContainer.innerHTML = html;
         
                 if (context.failed_entities.length > 100) {
                     const loadMoreBtn = document.querySelector('.load-more[data-spec-index="' + specIndex + '"][data-req-index="' + reqIndex + '"]');
@@ -372,18 +655,23 @@ function setupDetailHandlers() {
         if (event.target.classList.contains("load-more")) {
             var reqIndex = event.target.dataset.reqIndex;
             var specIndex = event.target.dataset.specIndex;
-            var context = jsondata.specifications[specIndex].requirements[reqIndex];
+            var context = jsondata.specifications[specIndex]?.requirements[reqIndex];
+            if (!context || !context.failed_entities) return;
+            
+            var tableContainer = document.getElementById('table-container-' + specIndex + '-' + reqIndex);
+            if (!tableContainer) return;
         
             // Determine the current count of loaded rows
             var currentCount = document.querySelectorAll('#table-container-' + specIndex + '-' + reqIndex + ' .row-class').length;
-            console.log(currentCount);
             // Slice the next 100 rows based on the currentCount
             var additionalRows = context.failed_entities.slice(currentCount, currentCount + 100);
-            var templateScript = document.getElementById('json-template-IDS-requirement').innerHTML;
+            
+            var templateScript = document.getElementById('json-template-IDS-requirement')?.innerHTML;
+            if (!templateScript) return;
+            
             var template = Handlebars.compile(templateScript);
             var html = template({failed_entities: additionalRows});
-        
-            document.getElementById('table-container-' + specIndex + '-' + reqIndex).insertAdjacentHTML('beforeend', html);
+            tableContainer.insertAdjacentHTML('beforeend', html);
         
             // Hide 'Load More' button if all rows are loaded
             if (currentCount + 100 >= context.failed_entities.length) {
