@@ -32,7 +32,18 @@ hdrs = (
     Script("""
         // v2 API: connect(methods) - no window parameter
         try {
-            window._streamBIMConnection = StreamBIM.connect({});
+            window._streamBIMConnection = StreamBIM.connect({
+                // Callback when widget expansion state changes
+                expandedChanged: function(isExpanded) {
+                    console.log('[IDS Widget] Expanded state changed:', isExpanded);
+                    if (isExpanded) {
+                        document.body.style.backgroundColor = '#343434';
+                    } else {
+                        // Reset to default (transparent/inherited from StreamBIM)
+                        document.body.style.backgroundColor = '';
+                    }
+                }
+            });
             window._streamBIMConnection.catch(function(e) {
                 console.error('StreamBIM connection failed:', e);
             });

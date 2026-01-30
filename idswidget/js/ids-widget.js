@@ -98,6 +98,8 @@ function startEarlyWasmInit() {
 startEarlyWasmInit();
 
 // Use the early connection established by sync script, or fall back to new connection (v2 API)
+// Note: expandedChanged callback is registered in the inline sync script (idswidget.py)
+// to ensure it's available before this ES module loads
 const connectPromise = window._streamBIMConnection || StreamBIM.connect({});
 
 connectPromise.then(function() {
