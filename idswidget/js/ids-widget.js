@@ -341,24 +341,6 @@ async function validateWithWasm(ifcData, idsData) {
     console.log('[IDS Widget] IFC loaded with ID:', ifcId, 'schema:', ifcSchema);
     
     try {
-        // Pre-validate IDS against IFC schema before running full validation
-        // This catches schema mismatches early and prevents Pyodide crashes
-        const preValidation = await wasm.preValidateIds(idsData, ifcSchema);
-        
-        if (!preValidation.valid) {
-            console.error('[IDS Widget] IDS pre-validation failed:', preValidation.error);
-            return {
-                success: false,
-                error: preValidation.error,
-                total_specifications: 0,
-                passed_specifications: 0,
-                failed_specifications: 0,
-                report: null
-            };
-        }
-        
-        console.log('[IDS Widget] IDS pre-validation passed, specs:', preValidation.specifications_count);
-        
         // Run full validation
         const result = await wasm.auditIfc(ifcId, idsData);
         console.log('[IDS Widget] Validation complete:', result);

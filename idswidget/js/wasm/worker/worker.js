@@ -307,120 +307,7 @@ json.dumps({"schema": ifc.schema})
             console.log("[api] Unloaded IFC file:", ifcId);
         },
 
-        /**
-         * Pre-validate IDS against an IFC schema before running full validation.
-         * This catches schema mismatches early and prevents Pyodide crashes.
-         */
-        async preValidateIds(idsData, ifcSchema) {
-            const idsString = new TextDecoder().decode(new Uint8Array(idsData));
-            const tempIdsPath = `/tmp/prevalidate_${Date.now()}.ids`;
-            pyodide.FS.writeFile(tempIdsPath, idsString);
-
-            const result = await pyodide.runPythonAsync(`
-import json
-from ifctester import ids
-from ifctester.facet import Entity
-import ifcopenshell
-
-result = None
-ids_path = "${tempIdsPath}"
-ifc_schema = "${ifcSchema}"
-
-try:
-    # Load and parse IDS file
-    my_ids = ids.open(ids_path)
-    
-    # Extract all entity types referenced in the IDS
-    def extract_value(restriction):
-        """Extract string values from IDS restriction"""
-        values = set()
-        if restriction is None:
-            return values
-        if isinstance(restriction, str):
-            values.add(restriction.upper())
-        elif isinstance(restriction, list):
-            for item in restriction:
-                values.update(extract_value(item))
-        elif hasattr(restriction, 'options'):
-            for opt in restriction.options:
-                values.add(str(opt).upper())
-        elif hasattr(restriction, 'value'):
-            values.add(str(restriction.value).upper())
-        else:
-            try:
-                values.add(str(restriction).upper())
-            except:
-                pass
-        return values
-
-    def get_ids_entity_types(ids_obj):
-        """Extract all entity type names referenced in IDS specifications"""
-        entity_types = set()
-        for spec in ids_obj.specifications:
-            if hasattr(spec, 'applicability') and spec.applicability:
-                for facet in spec.applicability:
-                    if isinstance(facet, Entity):
-                        if hasattr(facet, 'name') and facet.name:
-                            entity_types.update(extract_value(facet.name))
-            if hasattr(spec, 'requirements') and spec.requirements:
-                for facet in spec.requirements:
-                    if isinstance(facet, Entity):
-                        if hasattr(facet, 'name') and facet.name:
-                            entity_types.update(extract_value(facet.name))
-        return entity_types
-
-    # Check entity types against schema
-    schema = ifcopenshell.ifcopenshell_wrapper.schema_by_name(ifc_schema)
-    ids_entity_types = get_ids_entity_types(my_ids)
-    invalid_types = []
-    
-    for entity_type in ids_entity_types:
-        try:
-            schema.declaration_by_name(entity_type)
-        except:
-            invalid_types.append(entity_type)
-    
-    if invalid_types:
-        result = {
-            "valid": False,
-            "error": f"The IDS file references entity types not available in the IFC schema ({ifc_schema}): {', '.join(sorted(invalid_types))}. The IDS may be designed for a different IFC version (e.g., IFC4 vs IFC2X3).",
-            "specifications_count": len(my_ids.specifications),
-            "entity_types": list(ids_entity_types),
-            "invalid_types": invalid_types
-        }
-    else:
-        result = {
-            "valid": True,
-            "specifications_count": len(my_ids.specifications),
-            "entity_types": list(ids_entity_types),
-            "invalid_types": []
-        }
-except Exception as e:
-    result = {
-        "valid": False,
-        "error": f"Failed to parse IDS file: {str(e)}",
-        "specifications_count": 0,
-        "entity_types": [],
-        "invalid_types": []
-    }
-
-json.dumps(result)
-            `);
-
-            // Cleanup temp file
-            try {
-                pyodide.FS.unlink(tempIdsPath);
-            } catch (e) {}
-
-            const parsed = JSON.parse(result);
-            console.log("[api] Pre-validated IDS:", parsed.valid ? "OK" : "FAILED", 
-                        "specs:", parsed.specifications_count, 
-                        "entities:", parsed.entity_types?.length || 0);
-            
-            return parsed;
-        },
-
-        async auditIfc(ifcId, idsData, skipPreValidation = false) {
+        async auditIfc(ifcId, idsData) {
             const ifcInfo = LoadedIFC.get(ifcId);
             
             if (!ifcInfo) {
@@ -431,7 +318,7 @@ json.dumps(result)
             const idsPath = `/tmp/${encodeURIComponent(ifcId)}.ids`;
             pyodide.FS.writeFile(idsPath, idsString);
 
-            // Run validation (pre-validation should have been done separately)
+            // Run validation
             const result = await pyodide.runPythonAsync(`
 import json
 from ifctester import ids, reporter

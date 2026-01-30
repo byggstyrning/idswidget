@@ -156,18 +156,6 @@ class WASMModule {
     }
 
     /**
-     * Pre-validate IDS against an IFC schema before running full validation.
-     * This catches schema mismatches early and prevents Pyodide crashes.
-     * @param {ArrayBuffer|Uint8Array} idsData - The IDS XML file data
-     * @param {string} ifcSchema - The IFC schema name (e.g., "IFC2X3", "IFC4")
-     * @returns {Promise<Object>} - Validation result with valid, error, entity_types, etc.
-     */
-    async preValidateIds(idsData, ifcSchema) {
-        const idsBytes = idsData instanceof ArrayBuffer ? new Uint8Array(idsData) : idsData;
-        return this._apiCall('preValidateIds', Array.from(idsBytes), ifcSchema);
-    }
-
-    /**
      * Audit a loaded IFC file against IDS specifications
      * @param {string} ifcId - The ID of the loaded IFC file
      * @param {ArrayBuffer|Uint8Array} idsData - The IDS XML file data
@@ -199,14 +187,12 @@ export const {
     init,
     loadIfc,
     unloadIfc,
-    preValidateIds,
     auditIfc,
     dispose
 } = {
     init: (onProgress) => wasm.init(onProgress),
     loadIfc: (ifcData) => wasm.loadIfc(ifcData),
     unloadIfc: (ifcId) => wasm.unloadIfc(ifcId),
-    preValidateIds: (idsData, ifcSchema) => wasm.preValidateIds(idsData, ifcSchema),
     auditIfc: (ifcId, idsData) => wasm.auditIfc(ifcId, idsData),
     dispose: () => wasm.dispose()
 };
