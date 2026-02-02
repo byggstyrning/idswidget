@@ -7,6 +7,7 @@ import wasm from './wasm/index.js';
 
 var jsondata = '';
 var projectID = '';
+var baseUrl = ''; // Dynamically set based on StreamBIM host
 var wasmInitialized = false;
 var wasmInitializing = false;
 
@@ -110,9 +111,43 @@ connectPromise.then(function() {
 });
 
 /**
+ * Determine the StreamBIM base URL from the parent frame context
+ * The widget runs in an iframe, so we derive the host from document.referrer
+ */
+function getStreamBimBaseUrl() {
+    try {
+        // document.referrer contains the parent page URL
+        if (document.referrer) {
+            const url = new URL(document.referrer);
+            // Return the origin (protocol + host)
+            return url.origin;
+        }
+    } catch (e) {
+        console.warn('[IDS Widget] Could not parse referrer:', e);
+    }
+    
+    // Fallback: try to get from parent location (may fail due to CORS)
+    try {
+        if (window.parent && window.parent !== window) {
+            return window.parent.location.origin;
+        }
+    } catch (e) {
+        // Expected to fail due to cross-origin restrictions
+    }
+    
+    // Last resort fallback
+    console.warn('[IDS Widget] Could not determine StreamBIM host, using default');
+    return 'https://app.streambim.com';
+}
+
+/**
  * Initialize the widget after StreamBIM connection is established
  */
 function initializeWidget() {
+    // Determine the StreamBIM base URL dynamically
+    baseUrl = getStreamBimBaseUrl();
+    console.log('[IDS Widget] Using StreamBIM base URL:', baseUrl);
+    
     // Set StreamBIM styles
     StreamBIM.setStyles(".color-code-values--left-sliders-active {margin-left: 40%;}");
     
@@ -168,7 +203,7 @@ async function onIfcSelected(event) {
     pendingIfcDownload = (async () => {
         try {
             const downloadLink = await StreamBIM.makeApiRequest({ 
-                url: `https://app.streambim.com/project-${projectID}/api/v1/documents/${documentId}/downloadlink` 
+                url: `${baseUrl}/project-${projectID}/api/v1/documents/${documentId}/downloadlink` 
             });
             return downloadFileWithCache(downloadLink, documentId, revisionId, uploadDate);
         } catch (e) {
@@ -204,7 +239,7 @@ async function onIdsSelected(event) {
     pendingIdsDownload = (async () => {
         try {
             const downloadLink = await StreamBIM.makeApiRequest({ 
-                url: `https://app.streambim.com/project-${projectID}/api/v1/documents/${documentId}/downloadlink` 
+                url: `${baseUrl}/project-${projectID}/api/v1/documents/${documentId}/downloadlink` 
             });
             return downloadFileWithCache(downloadLink, documentId, revisionId, uploadDate);
         } catch (e) {
@@ -221,7 +256,7 @@ function loadFileSelectors() {
     const queryIds = { filter: { freetext: ".ids", isDeleted: false } };
     const base64queryIds = btoa(JSON.stringify(queryIds));
     
-    StreamBIM.makeApiRequest({url: `https://app.streambim.com/project-${projectID}/api/v1/documents/export/json/?query=${base64queryIds}`})
+    StreamBIM.makeApiRequest({url: `${baseUrl}/project-${projectID}/api/v1/documents/export/json/?query=${base64queryIds}`})
     .then(response => JSON.parse(response))
     .then(idsDocuments => populateSelectElement(idsDocuments, 'ids_filename'))
     .then(() => {
@@ -237,7 +272,7 @@ function loadFileSelectors() {
     const queryIfc = { filter: { freetext: ".ifc", isDeleted: false } };
     const base64queryIfc = btoa(JSON.stringify(queryIfc));
     
-    StreamBIM.makeApiRequest({url: `https://app.streambim.com/project-${projectID}/api/v1/documents/export/json/?query=${base64queryIfc}`})
+    StreamBIM.makeApiRequest({url: `${baseUrl}/project-${projectID}/api/v1/documents/export/json/?query=${base64queryIfc}`})
     .then(response => JSON.parse(response))
     .then(ifcDocuments => populateSelectElement(ifcDocuments, 'ifc_filename'))
     .then(() => {
@@ -314,7 +349,7 @@ async function initializeWasm() {
  * Uses server-side proxy to avoid CORS issues
  */
 async function downloadFile(downloadLink) {
-    const fullUrl = `https://app.streambim.com/project-${projectID}/api/v1/${downloadLink}`;
+    const fullUrl = `${baseUrl}/project-${projectID}/api/v1/${downloadLink}`;
     
     // Use proxy endpoint to avoid CORS issues
     // Cookies are automatically forwarded by the browser
@@ -511,7 +546,7 @@ async function handleValidateClick() {
         }
         if (!ifcData) {
             const downloadlinkIfc = await StreamBIM.makeApiRequest({ 
-                url: `https://app.streambim.com/project-${projectID}/api/v1/documents/${documentIfcID}/downloadlink` 
+                url: `${baseUrl}/project-${projectID}/api/v1/documents/${documentIfcID}/downloadlink` 
             });
             ifcData = await downloadFileWithCache(downloadlinkIfc, ifcMeta.documentId, ifcMeta.revisionId, ifcMeta.uploadDate);
         }
@@ -525,7 +560,7 @@ async function handleValidateClick() {
         }
         if (!idsData) {
             const downloadlinkIds = await StreamBIM.makeApiRequest({ 
-                url: `https://app.streambim.com/project-${projectID}/api/v1/documents/${documentIdsID}/downloadlink` 
+                url: `${baseUrl}/project-${projectID}/api/v1/documents/${documentIdsID}/downloadlink` 
             });
             idsData = await downloadFileWithCache(downloadlinkIds, idsMeta.documentId, idsMeta.revisionId, idsMeta.uploadDate);
         }
