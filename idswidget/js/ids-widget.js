@@ -115,18 +115,37 @@ connectPromise.then(function() {
  * The widget runs in an iframe, so we derive the host from document.referrer
  */
 function getStreamBimBaseUrl() {
+    // Priority 1: Check URL parameter for testing/override (e.g., ?streambim_host=https://client.streambim.com)
     try {
-        // document.referrer contains the parent page URL
+        const urlParams = new URLSearchParams(window.location.search);
+        const hostParam = urlParams.get('streambim_host');
+        if (hostParam) {
+            console.log('[IDS Widget] Using streambim_host from URL parameter:', hostParam);
+            return hostParam;
+        }
+    } catch (e) {}
+    
+    // Priority 2: Use ancestorOrigins if available (Chrome/Edge/Safari support)
+    // This reliably provides the parent frame's origin even with cross-origin restrictions
+    try {
+        if (window.location.ancestorOrigins && window.location.ancestorOrigins.length > 0) {
+            const ancestorOrigin = window.location.ancestorOrigins[0];
+            console.log('[IDS Widget] Using ancestorOrigins:', ancestorOrigin);
+            return ancestorOrigin;
+        }
+    } catch (e) {}
+    
+    // Priority 3: Use document.referrer (fallback for browsers without ancestorOrigins)
+    try {
         if (document.referrer) {
             const url = new URL(document.referrer);
-            // Return the origin (protocol + host)
             return url.origin;
         }
     } catch (e) {
         console.warn('[IDS Widget] Could not parse referrer:', e);
     }
     
-    // Fallback: try to get from parent location (may fail due to CORS)
+    // Priority 4: Try to get from parent location (may fail due to CORS)
     try {
         if (window.parent && window.parent !== window) {
             return window.parent.location.origin;
