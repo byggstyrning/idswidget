@@ -318,42 +318,172 @@ json.dumps({"schema": ifc.schema})
             const idsPath = `/tmp/${encodeURIComponent(ifcId)}.ids`;
             pyodide.FS.writeFile(idsPath, idsString);
 
-            // Run validation
+            // Run validation with schema compatibility checking
             const result = await pyodide.runPythonAsync(`
 import json
 from ifctester import ids, reporter
 import ifcopenshell
+import ifcopenshell.util.schema
+import xml.etree.ElementTree as ET
+import re
 
 result = None
 ifc_path = "/tmp/${encodeURIComponent(ifcId)}.ifc"
 ids_path = "${idsPath}"
 
-try:
-    my_ifc = ifcopenshell.open(ifc_path)
-    my_ids = ids.open(ids_path)
+def check_ids_schema_compatibility(ids_xml_content, ifc_schema):
+    """
+    Check if all entity types referenced in the IDS file exist in the IFC schema.
+    Returns a list of incompatible entity types.
+    """
+    incompatible_entities = []
+    schema_obj = ifcopenshell.ifcopenshell_wrapper.schema_by_name(ifc_schema)
     
-    my_ids.validate(my_ifc)
+    # Parse the IDS XML
+    try:
+        root = ET.fromstring(ids_xml_content)
+    except ET.ParseError:
+        return []  # Let the IDS parser handle XML errors
     
-    json_reporter = reporter.Json(my_ids)
-    json_reporter.report()
-    json_report = json_reporter.to_string()
-    
-    total_specs = len(my_ids.specifications)
-    passed_specs = sum(1 for spec in my_ids.specifications if spec.status)
-    failed_specs = total_specs - passed_specs
-    
-    result = {
-        "success": True,
-        "total_specifications": total_specs,
-        "passed_specifications": passed_specs,
-        "failed_specifications": failed_specs,
-        "report": json_report
+    # Find all entity facets - handle both namespaced and non-namespaced XML
+    namespaces = {
+        'ids': 'http://standards.buildingsmart.org/IDS',
+        'xs': 'http://www.w3.org/2001/XMLSchema'
     }
+    
+    # Try namespaced first
+    entity_elements = root.findall('.//ids:entity', namespaces)
+    if not entity_elements:
+        # Fall back to searching without namespace
+        entity_elements = root.findall('.//{*}entity')
+    if not entity_elements:
+        # Try direct search for 'entity' elements
+        entity_elements = []
+        for elem in root.iter():
+            if elem.tag.endswith('entity') or elem.tag == 'entity':
+                entity_elements.append(elem)
+    
+    for entity_elem in entity_elements:
+        # Get the name element (could be simpleValue, restriction with enumeration, etc.)
+        name_elem = None
+        for child in entity_elem:
+            tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+            if tag == 'name':
+                name_elem = child
+                break
+        
+        if name_elem is None:
+            continue
+            
+        # Extract entity type name(s) from the name element
+        entity_names = []
+        
+        # Check for simpleValue child
+        for child in name_elem:
+            tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+            if tag == 'simpleValue':
+                if child.text:
+                    entity_names.append(child.text.strip().upper())
+            elif tag == 'restriction':
+                # Handle xs:restriction with enumeration values
+                for enum_elem in child:
+                    enum_tag = enum_elem.tag.split('}')[-1] if '}' in enum_elem.tag else enum_elem.tag
+                    if enum_tag == 'enumeration':
+                        value = enum_elem.get('value')
+                        if value:
+                            entity_names.append(value.strip().upper())
+        
+        # Check each entity name against the schema
+        for entity_name in entity_names:
+            try:
+                schema_obj.declaration_by_name(entity_name)
+            except RuntimeError:
+                incompatible_entities.append(entity_name)
+    
+    return list(set(incompatible_entities))  # Remove duplicates
+
+try:
+    # Step 1: Validate the IDS file structure against the XSD schema (no IFC needed)
+    # This catches malformed IDS files early with clear error messages
+    try:
+        my_ids = ids.open(ids_path, validate=True)
+    except ids.IdsXmlValidationError as xml_err:
+        # IDS file doesn't conform to the XSD schema
+        result = {
+            "success": False,
+            "error": f"Invalid IDS file: {str(xml_err)}",
+            "error_type": "ids_xml_validation",
+            "total_specifications": 0,
+            "passed_specifications": 0,
+            "failed_specifications": 0,
+            "report": None
+        }
+        raise StopIteration()  # Use to exit the try block early
+    
+    # Step 2: Load the IFC file and get its schema
+    my_ifc = ifcopenshell.open(ifc_path)
+    ifc_schema = my_ifc.schema
+    
+    # Step 3: Read IDS content for entity type compatibility check
+    with open(ids_path, 'r', encoding='utf-8') as f:
+        ids_content = f.read()
+    
+    # Step 4: Check if entity types in IDS exist in the IFC schema
+    incompatible = check_ids_schema_compatibility(ids_content, ifc_schema)
+    
+    if incompatible:
+        # Return a user-friendly error about schema mismatch
+        entity_list = ', '.join(sorted(incompatible)[:10])  # Show first 10
+        more_count = len(incompatible) - 10 if len(incompatible) > 10 else 0
+        more_text = f' and {more_count} more' if more_count > 0 else ''
+        result = {
+            "success": False,
+            "error": f"Schema mismatch: The IDS file references entity types that don't exist in {ifc_schema}: {entity_list}{more_text}. The IDS may be designed for a newer IFC version (e.g., IFC4).",
+            "error_type": "schema_mismatch",
+            "total_specifications": 0,
+            "passed_specifications": 0,
+            "failed_specifications": 0,
+            "report": None,
+            "incompatible_entities": incompatible
+        }
+    else:
+        # Step 5: Run full IFC validation against IDS
+        my_ids.validate(my_ifc)
+        
+        json_reporter = reporter.Json(my_ids)
+        json_reporter.report()
+        json_report = json_reporter.to_string()
+        
+        total_specs = len(my_ids.specifications)
+        passed_specs = sum(1 for spec in my_ids.specifications if spec.status)
+        failed_specs = total_specs - passed_specs
+        
+        result = {
+            "success": True,
+            "total_specifications": total_specs,
+            "passed_specifications": passed_specs,
+            "failed_specifications": failed_specs,
+            "report": json_report
+        }
+except StopIteration:
+    pass  # Result already set in the IDS validation block
 except Exception as e:
+    import traceback
     error_msg = str(e)
+    tb = traceback.format_exc()
+    
+    # Try to extract meaningful error message
+    if "not found in schema" in error_msg.lower():
+        # Extract entity name from error message
+        match = re.search(r"Entity with name '([^']+)' not found in schema '([^']+)'", error_msg, re.IGNORECASE)
+        if match:
+            entity_name, schema_name = match.groups()
+            error_msg = f"Schema mismatch: The entity type '{entity_name}' does not exist in {schema_name}. The IDS may be designed for a newer IFC version."
+    
     result = {
         "success": False,
         "error": f"Validation error: {error_msg}",
+        "error_type": "validation_error",
         "total_specifications": 0,
         "passed_specifications": 0,
         "failed_specifications": 0,

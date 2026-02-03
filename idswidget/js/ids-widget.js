@@ -595,8 +595,33 @@ async function handleValidateClick() {
 
         // Check if validation returned an error (e.g., schema mismatch)
         if (data && data.success === false && data.error) {
-            console.error('[IDS Widget] Validation error:', data.error);
-            document.getElementById("report").innerHTML = `<div class="error">${data.error}</div>`;
+            console.error('[IDS Widget] Validation error:', data.error, 'type:', data.error_type);
+            
+            // Determine error title based on error type
+            let errorTitle = 'Validation Error';
+            if (data.error_type === 'ids_xml_validation') {
+                errorTitle = 'Invalid IDS File';
+            } else if (data.error_type === 'schema_mismatch') {
+                errorTitle = 'IFC Schema Mismatch';
+            }
+            
+            // Build a more informative error display
+            let errorHtml = `<div class="error validation-error">
+                <h3>${errorTitle}</h3>
+                <p>${escapeHtml(data.error)}</p>`;
+            
+            // If we have a list of incompatible entities, show them
+            if (data.incompatible_entities && data.incompatible_entities.length > 0) {
+                errorHtml += `<details>
+                    <summary>Incompatible entity types (${data.incompatible_entities.length})</summary>
+                    <ul class="incompatible-entities-list">
+                        ${data.incompatible_entities.map(e => `<li>${escapeHtml(e)}</li>`).join('')}
+                    </ul>
+                </details>`;
+            }
+            
+            errorHtml += `</div>`;
+            document.getElementById("report").innerHTML = errorHtml;
             return;
         }
 
@@ -717,6 +742,15 @@ function setupDetailHandlers() {
             }
         }
     });
+}
+
+/**
+ * Escape HTML to prevent XSS when displaying user/external content
+ */
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
 }
 
 // Helper function to get the value of a given key in an array of objects
