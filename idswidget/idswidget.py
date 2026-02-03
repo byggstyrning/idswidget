@@ -79,15 +79,25 @@ def load_template(filename: str) -> str:
     Returns:
         str: The contents of the template file, or an empty string if an error occurs.
     """
-    try:
-        with open(filename, 'r') as file:
-            return file.read()
-    except FileNotFoundError:
-        logger.error(f"Template file '{filename}' not found.")
-        return ""
-    except IOError as e:
-        logger.error(f"Error reading template file '{filename}': {str(e)}")
-        return ""
+    # Try multiple paths for different deployment scenarios
+    paths_to_try = [
+        filename,  # Original path (Docker: /app/json-templates/...)
+        filename.replace('/app/', './'),  # Local: ./json-templates/...
+        filename.replace('/app/', ''),  # Relative: json-templates/...
+    ]
+    
+    for path in paths_to_try:
+        try:
+            with open(path, 'r') as file:
+                return file.read()
+        except FileNotFoundError:
+            continue
+        except IOError as e:
+            logger.error(f"Error reading template file '{path}': {str(e)}")
+            continue
+    
+    logger.error(f"Template file '{filename}' not found in any expected location.")
+    return ""
 
 @rt('/')
 def get():

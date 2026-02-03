@@ -47,7 +47,10 @@ class WASMModule {
         this.onProgress = onProgress;
 
         // Use classic worker (not module) since we use importScripts for Pyodide
-        this.worker = new Worker(new URL('./worker/worker.js', import.meta.url));
+        // Add cache-busting timestamp to ensure fresh worker code
+        const workerUrl = new URL('./worker/worker.js', import.meta.url);
+        workerUrl.searchParams.set('t', Date.now());
+        this.worker = new Worker(workerUrl);
 
         this.worker.onmessage = (event) => {
             this._handleWorkerMessage(event.data);
@@ -167,6 +170,16 @@ class WASMModule {
     }
 
     /**
+     * Validate an IDS file structure without needing an IFC file
+     * @param {ArrayBuffer|Uint8Array} idsData - The IDS XML file data
+     * @returns {Promise<Object>} - Validation result with success status and any errors
+     */
+    async validateIds(idsData) {
+        const idsBytes = idsData instanceof ArrayBuffer ? new Uint8Array(idsData) : idsData;
+        return this._apiCall('validateIds', Array.from(idsBytes));
+    }
+
+    /**
      * Cleanup resources
      */
     async dispose() {
@@ -188,13 +201,17 @@ export const {
     loadIfc,
     unloadIfc,
     auditIfc,
-    dispose
+    validateIds,
+    dispose,
+    _apiCall
 } = {
     init: (onProgress) => wasm.init(onProgress),
     loadIfc: (ifcData) => wasm.loadIfc(ifcData),
     unloadIfc: (ifcId) => wasm.unloadIfc(ifcId),
     auditIfc: (ifcId, idsData) => wasm.auditIfc(ifcId, idsData),
-    dispose: () => wasm.dispose()
+    validateIds: (idsData) => wasm.validateIds(idsData),
+    dispose: () => wasm.dispose(),
+    _apiCall: (method, ...args) => wasm._apiCall(method, ...args)
 };
 
 export default wasm;

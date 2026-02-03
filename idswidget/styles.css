@@ -342,6 +342,49 @@ div#loading-indicator {
     color: #ffaaaa;
 }
 
+/* IDS Validation Messages */
+#ids-validation-message {
+    padding: 8px 12px;
+    border-radius: 5px;
+    margin: 10px 0;
+    font-size: 0.9em;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.ids-validation-success {
+    background-color: rgba(70, 213, 31, 0.2);
+    color: #8eff6b;
+    border: 1px solid rgba(70, 213, 31, 0.4);
+}
+
+.ids-validation-success .ids-validation-icon::before {
+    content: '✓';
+    font-weight: bold;
+}
+
+.ids-validation-error {
+    background-color: rgba(218, 12, 12, 0.2);
+    color: #ff5f5f;
+    border: 1px solid rgba(218, 12, 12, 0.4);
+}
+
+.ids-validation-error .ids-validation-icon::before {
+    content: '✗';
+    font-weight: bold;
+}
+
+.ids-validation-warning {
+    background-color: rgba(242, 146, 28, 0.2);
+    color: #ffb74d;
+    border: 1px solid rgba(242, 146, 28, 0.4);
+}
+
+.ids-validation-warning .ids-validation-icon::before {
+    content: '⚠';
+}
+
 .reload-button {
     background-color: var(--streambim-orange);
     color: white;

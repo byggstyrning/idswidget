@@ -3,7 +3,12 @@
  * Uses Pyodide (Python in WASM) to run ifcopenshell/ifctester in the browser
  */
 
-import wasm from './wasm/index.js';
+// Dynamic import with cache busting to ensure fresh module code
+let wasm = null;
+const wasmModulePromise = import(`./wasm/index.js?t=${Date.now()}`).then(module => {
+    wasm = module.default;
+    return wasm;
+});
 
 var jsondata = '';
 var projectID = '';
@@ -232,12 +237,19 @@ async function onIfcSelected(event) {
     })();
 }
 
+// Store IDS validation result for use during audit
+let idsValidationResult = null;
+
 /**
- * Handle IDS file selection - start fetching in background
+ * Handle IDS file selection - start fetching and validating in background
  */
 async function onIdsSelected(event) {
     const select = event.target;
     const selectedOption = select.options[select.selectedIndex];
+    
+    // Clear any previous validation messages
+    clearIdsValidationMessage();
+    idsValidationResult = null;
     
     if (!selectedOption || !selectedOption.value) {
         pendingIdsDownload = null;
@@ -248,11 +260,12 @@ async function onIdsSelected(event) {
     const documentId = selectedOption.value;
     const revisionId = selectedOption.dataset.revId || null;
     const uploadDate = selectedOption.dataset.uploadDate || null;
+    const filename = selectedOption.text;
     
     // Store metadata for cache key
-    selectedIdsMeta = { documentId, revisionId, uploadDate };
+    selectedIdsMeta = { documentId, revisionId, uploadDate, filename };
     
-    console.log('[IDS Widget] IDS selected:', selectedOption.text);
+    console.log('[IDS Widget] IDS selected:', filename);
     
     // Start fetching in background (will use cache if available)
     pendingIdsDownload = (async () => {
@@ -260,12 +273,81 @@ async function onIdsSelected(event) {
             const downloadLink = await StreamBIM.makeApiRequest({ 
                 url: `${baseUrl}/project-${projectID}/api/v1/documents/${documentId}/downloadlink` 
             });
-            return downloadFileWithCache(downloadLink, documentId, revisionId, uploadDate);
+            const data = await downloadFileWithCache(downloadLink, documentId, revisionId, uploadDate);
+            
+            // Once downloaded, validate the IDS file in the background
+            if (data) {
+                validateIdsInBackground(data, filename);
+            }
+            
+            return data;
         } catch (e) {
             console.warn('[IDS Widget] Background IDS fetch failed:', e.message);
             return null;
         }
     })();
+}
+
+/**
+ * Validate IDS file in background and show feedback to user
+ */
+async function validateIdsInBackground(idsData, filename) {
+    try {
+        // Make sure WASM is initialized
+        await initializeWasm();
+        
+        console.log('[IDS Widget] Validating IDS file:', filename);
+        const result = await wasm.validateIds(idsData);
+        idsValidationResult = result;
+        
+        if (result.success && result.valid) {
+            // IDS is valid - just log it, don't show success message to user
+            console.log('[IDS Widget] IDS file valid:', result.specifications_count, 'specifications');
+            if (result.entity_types?.length > 0) {
+                console.log('[IDS Widget] IDS references entity types:', result.entity_types);
+            }
+            // Clear any previous error message
+            clearIdsValidationMessage();
+        } else if (result.success && !result.valid) {
+            // IDS structure is invalid
+            showIdsValidationMessage('error', result.error || 'Invalid IDS file structure');
+            console.error('[IDS Widget] IDS validation failed:', result.error);
+        } else {
+            // Unexpected error
+            showIdsValidationMessage('warning', 'Could not validate IDS file');
+            console.warn('[IDS Widget] IDS validation error:', result.error);
+        }
+    } catch (e) {
+        console.warn('[IDS Widget] Background IDS validation failed:', e.message);
+        // Don't show error - WASM might not be ready yet, validation will happen during audit
+    }
+}
+
+/**
+ * Show IDS validation message to user
+ */
+function showIdsValidationMessage(type, message) {
+    clearIdsValidationMessage();
+    
+    const container = document.querySelector('.file-selection-container');
+    if (!container) return;
+    
+    const msgDiv = document.createElement('div');
+    msgDiv.id = 'ids-validation-message';
+    msgDiv.className = `ids-validation-${type}`;
+    msgDiv.innerHTML = `<span class="ids-validation-icon"></span>${escapeHtml(message)}`;
+    
+    container.insertAdjacentElement('afterend', msgDiv);
+}
+
+/**
+ * Clear IDS validation message
+ */
+function clearIdsValidationMessage() {
+    const existing = document.getElementById('ids-validation-message');
+    if (existing) {
+        existing.remove();
+    }
 }
 
 /**
@@ -344,6 +426,9 @@ async function initializeWasm() {
     wasmInitializing = true;
 
     try {
+        // Ensure wasm module is loaded (from dynamic import)
+        await wasmModulePromise;
+        
         await wasm.init((progress) => {
             console.log('[WASM]', progress.message, progress.percent);
         });
@@ -390,11 +475,53 @@ async function validateWithWasm(ifcData, idsData) {
     // Ensure WASM is initialized
     await initializeWasm();
     
+    // If we don't have a pre-validation result, validate the IDS now
+    if (!idsValidationResult) {
+        console.log('[IDS Widget] No pre-validation result, validating IDS now...');
+        idsValidationResult = await wasm.validateIds(idsData);
+    }
+    
+    // Check if IDS is valid
+    if (idsValidationResult && !idsValidationResult.valid) {
+        return {
+            success: false,
+            error: idsValidationResult.error || 'Invalid IDS file',
+            error_type: 'ids_xml_validation'
+        };
+    }
+    
     // Load IFC file and get schema info
     const loadResult = await wasm.loadIfc(ifcData);
     const ifcId = loadResult.ifcId;
     const ifcSchema = loadResult.schema;
     console.log('[IDS Widget] IFC loaded with ID:', ifcId, 'schema:', ifcSchema);
+    
+    // Check schema compatibility BEFORE running full validation
+    // This prevents the fatal Pyodide crash
+    if (idsValidationResult && idsValidationResult.entity_types) {
+        const incompatible = await checkEntityTypesCompatibility(ifcSchema, idsValidationResult.entity_types);
+        if (incompatible.length > 0) {
+            // Cleanup before returning error
+            await wasm.unloadIfc(ifcId);
+            
+            const entityList = incompatible.slice(0, 10).join(', ');
+            const moreCount = incompatible.length > 10 ? incompatible.length - 10 : 0;
+            const moreText = moreCount > 0 ? ` and ${moreCount} more` : '';
+            
+            // Determine IDS target version from validation result
+            const idsTargets = idsValidationResult.ifc_versions || [];
+            const idsTargetText = idsTargets.length > 0 ? idsTargets.join('/') : 'IFC4';
+            
+            return {
+                success: false,
+                error: `The IDS file is designed for ${idsTargetText}, but the IFC model uses ${ifcSchema}. The following entity types are not available in ${ifcSchema}: ${entityList}${moreText}.`,
+                error_type: 'schema_mismatch',
+                incompatible_entities: incompatible,
+                ids_schema: idsTargetText,
+                ifc_schema: ifcSchema
+            };
+        }
+    }
     
     try {
         // Run full validation
@@ -404,6 +531,23 @@ async function validateWithWasm(ifcData, idsData) {
     } finally {
         // Cleanup: unload the IFC file
         await wasm.unloadIfc(ifcId);
+    }
+}
+
+/**
+ * Check if entity types are compatible with an IFC schema
+ * This runs in Python via WASM to use ifcopenshell's schema definitions
+ */
+async function checkEntityTypesCompatibility(ifcSchema, entityTypes) {
+    if (!entityTypes || entityTypes.length === 0) return [];
+    
+    try {
+        const result = await wasm._apiCall('checkEntityTypes', ifcSchema, entityTypes);
+        return result.incompatible || [];
+    } catch (e) {
+        console.warn('[IDS Widget] Entity type check failed:', e.message);
+        // Fall back to letting the Python validation handle it
+        return [];
     }
 }
 
@@ -602,7 +746,12 @@ async function handleValidateClick() {
             if (data.error_type === 'ids_xml_validation') {
                 errorTitle = 'Invalid IDS File';
             } else if (data.error_type === 'schema_mismatch') {
-                errorTitle = 'IFC Schema Mismatch';
+                // Use specific schema versions in title if available
+                if (data.ids_schema && data.ifc_schema) {
+                    errorTitle = `Schema Mismatch: IDS targets ${data.ids_schema}, model is ${data.ifc_schema}`;
+                } else {
+                    errorTitle = 'IFC Schema Mismatch';
+                }
             }
             
             // Build a more informative error display

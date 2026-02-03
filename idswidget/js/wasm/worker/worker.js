@@ -307,6 +307,155 @@ json.dumps({"schema": ifc.schema})
             console.log("[api] Unloaded IFC file:", ifcId);
         },
 
+        /**
+         * Validate an IDS file structure without needing an IFC file
+         * Checks XML schema validity and extracts entity types for compatibility info
+         */
+        async validateIds(idsData) {
+            const idsString = new TextDecoder().decode(new Uint8Array(idsData));
+            const idsPath = `/tmp/validate_ids_${Date.now()}.ids`;
+            pyodide.FS.writeFile(idsPath, idsString);
+
+            const result = await pyodide.runPythonAsync(`
+import json
+from ifctester import ids
+import xml.etree.ElementTree as ET
+
+result = None
+ids_path = "${idsPath}"
+
+def extract_entity_types(ids_xml_content):
+    """Extract all entity types referenced in the IDS file."""
+    entity_types = set()
+    
+    try:
+        root = ET.fromstring(ids_xml_content)
+    except ET.ParseError:
+        return []
+    
+    # Find all entity elements
+    for elem in root.iter():
+        if elem.tag.endswith('entity') or elem.tag == 'entity':
+            for child in elem:
+                tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+                if tag == 'name':
+                    for name_child in child:
+                        name_tag = name_child.tag.split('}')[-1] if '}' in name_child.tag else name_child.tag
+                        if name_tag == 'simpleValue' and name_child.text:
+                            entity_types.add(name_child.text.strip().upper())
+                        elif name_tag == 'restriction':
+                            for enum_elem in name_child:
+                                enum_tag = enum_elem.tag.split('}')[-1] if '}' in enum_elem.tag else enum_elem.tag
+                                if enum_tag == 'enumeration':
+                                    value = enum_elem.get('value')
+                                    if value:
+                                        entity_types.add(value.strip().upper())
+    
+    return sorted(list(entity_types))
+
+try:
+    # Read IDS content
+    with open(ids_path, 'r', encoding='utf-8') as f:
+        ids_content = f.read()
+    
+    # Step 1: Validate IDS XML structure against XSD schema
+    try:
+        my_ids = ids.open(ids_path, validate=True)
+        
+        # Extract metadata
+        specs_count = len(my_ids.specifications)
+        ifc_versions = set()
+        for spec in my_ids.specifications:
+            if hasattr(spec, 'ifcVersion'):
+                ifc_versions.update(spec.ifcVersion)
+        
+        # Extract entity types for compatibility checking
+        entity_types = extract_entity_types(ids_content)
+        
+        result = {
+            "success": True,
+            "valid": True,
+            "specifications_count": specs_count,
+            "ifc_versions": sorted(list(ifc_versions)),
+            "entity_types": entity_types,
+            "info": my_ids.info if hasattr(my_ids, 'info') else {}
+        }
+    except ids.IdsXmlValidationError as xml_err:
+        result = {
+            "success": True,
+            "valid": False,
+            "error": f"Invalid IDS file structure: {str(xml_err)}",
+            "error_type": "xml_validation"
+        }
+    except Exception as parse_err:
+        result = {
+            "success": True,
+            "valid": False,
+            "error": f"Failed to parse IDS file: {str(parse_err)}",
+            "error_type": "parse_error"
+        }
+except Exception as e:
+    import traceback
+    result = {
+        "success": False,
+        "error": f"IDS validation error: {str(e)}",
+        "traceback": traceback.format_exc()
+    }
+
+# Cleanup
+try:
+    import os
+    os.remove(ids_path)
+except:
+    pass
+
+json.dumps(result)
+            `);
+
+            const parsed = JSON.parse(result);
+            console.log("[api] IDS validation result:", parsed);
+            return parsed;
+        },
+
+        /**
+         * Check if entity types exist in a given IFC schema
+         * Uses type_map for safe lookup without C++ exceptions
+         */
+        async checkEntityTypes(ifcSchema, entityTypes) {
+            const entityTypesJson = JSON.stringify(entityTypes);
+            
+            const result = await pyodide.runPythonAsync(`
+import json
+import ifcopenshell.util.schema
+
+entity_types = json.loads('${entityTypesJson}')
+ifc_schema = "${ifcSchema}"
+
+incompatible = []
+try:
+    # Use util.schema which has safer lookups via type maps
+    schema_obj = ifcopenshell.ifcopenshell_wrapper.schema_by_name(ifc_schema)
+    
+    # Get all declarations as a set for O(1) lookup
+    all_declarations = set()
+    for decl in schema_obj.declarations():
+        all_declarations.add(decl.name().upper())
+    
+    for entity_name in entity_types:
+        if entity_name.upper() not in all_declarations:
+            incompatible.append(entity_name)
+except Exception as e:
+    print(f"Schema check error: {e}")
+    pass  # If schema lookup fails, return empty list
+
+json.dumps({"incompatible": incompatible})
+            `);
+
+            const parsed = JSON.parse(result);
+            console.log("[api] Entity type compatibility check:", parsed);
+            return parsed;
+        },
+
         async auditIfc(ifcId, idsData) {
             const ifcInfo = LoadedIFC.get(ifcId);
             
