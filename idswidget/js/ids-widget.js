@@ -591,7 +591,7 @@ function createSearchableSelect(selectElement) {
 
     const wrapper = document.createElement('div');
     wrapper.className = 'searchable-select';
-    wrapper.innerHTML = selectElement.options[selectElement.selectedIndex].text;
+    wrapper.textContent = selectElement.options[selectElement.selectedIndex].text;
 
     const dropdown = document.createElement('div');
     dropdown.className = 'searchable-select-dropdown';
@@ -634,7 +634,7 @@ function createSearchableSelect(selectElement) {
     dropdown.addEventListener('click', (event) => {
         if (event.target.tagName === 'DIV') {
             selectElement.value = event.target.dataset.value;
-            wrapper.innerHTML = event.target.textContent;
+            wrapper.textContent = event.target.textContent;
             dropdown.style.display = 'none';
             selectElement.dispatchEvent(new Event('change'));
         }
