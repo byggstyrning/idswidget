@@ -431,6 +431,11 @@ async function initializeWasm() {
         
         await wasm.init((progress) => {
             console.log('[WASM]', progress.message, progress.percent);
+            // Shown under the spinner while validating (init and validation progress)
+            const progressText = document.getElementById('wasm-progress-text');
+            if (progressText) {
+                progressText.textContent = progress.message;
+            }
         });
         
         wasmInitialized = true;
@@ -526,7 +531,12 @@ async function validateWithWasm(ifcData, idsData) {
     try {
         // Run full validation
         const result = await wasm.auditIfc(ifcId, idsData);
-        console.log('[IDS Widget] Validation complete:', result);
+        // Log a summary only: logging the result keeps the report string alive
+        console.log('[IDS Widget] Validation complete:', {
+            total: result.total_specifications,
+            passed: result.passed_specifications,
+            failed: result.failed_specifications
+        });
         return result;
     } finally {
         // Cleanup: unload the IFC file
@@ -706,6 +716,9 @@ async function handleValidateClick() {
         if (usePendingIfc) {
             console.log('[IDS Widget] Using pending IFC download');
             ifcData = await pendingIfcDownload;
+            // The buffer is transferred to the worker (and emptied) during
+            // validation, so a later run must re-read it from the file cache
+            pendingIfcDownload = null;
         }
         if (!ifcData) {
             const downloadlinkIfc = await StreamBIM.makeApiRequest({ 
@@ -801,6 +814,7 @@ async function handleValidateClick() {
         if (loadingIndicator) {
             // Check if this is a fatal Pyodide error that requires reload
             const isFatalError = error.message && (
+                error.message.startsWith('Out of memory') ||
                 error.message.includes('fatally failed') ||
                 error.message.includes('fatal error') ||
                 error.message.includes('can no longer be used')
@@ -808,9 +822,12 @@ async function handleValidateClick() {
             
             if (isFatalError) {
                 // Show reload prompt for fatal errors
+                const reason = error.message.startsWith('Out of memory')
+                    ? error.message
+                    : 'The validation engine encountered an error and needs to be restarted.';
                 loadingIndicator.innerHTML = `
                     <div class="error">
-                        <p>The validation engine encountered an error and needs to be restarted.</p>
+                        <p>${escapeHtml(reason)}</p>
                         <button onclick="location.reload()" class="reload-button">Reload Widget</button>
                     </div>`;
             } else {
@@ -859,17 +876,17 @@ function setupDetailHandlers() {
             } else {
                 // If details are closed, load content
                 var context = jsondata.specifications[specIndex]?.requirements[reqIndex];
-                if (!context || !context.failed_entities) return;
+                if (!context || !context.failed) return;
                 
                 var templateScript = document.getElementById('json-template-IDS-requirement')?.innerHTML;
                 if (!templateScript) return;
                 
                 var template = Handlebars.compile(templateScript);
-                var initialRows = context.failed_entities.slice(0, 100);
+                var initialRows = getFailedRows(context, 0, 100);
                 var html = template({failed_entities: initialRows});
                 tableContainer.innerHTML = html;
         
-                if (context.failed_entities.length > 100) {
+                if (context.failed.global_id.length > 100) {
                     const loadMoreBtn = document.querySelector('.load-more[data-spec-index="' + specIndex + '"][data-req-index="' + reqIndex + '"]');
                     if (loadMoreBtn) loadMoreBtn.style.display = 'block';
                 }
@@ -882,7 +899,7 @@ function setupDetailHandlers() {
             var reqIndex = event.target.dataset.reqIndex;
             var specIndex = event.target.dataset.specIndex;
             var context = jsondata.specifications[specIndex]?.requirements[reqIndex];
-            if (!context || !context.failed_entities) return;
+            if (!context || !context.failed) return;
             
             var tableContainer = document.getElementById('table-container-' + specIndex + '-' + reqIndex);
             if (!tableContainer) return;
@@ -890,7 +907,7 @@ function setupDetailHandlers() {
             // Determine the current count of loaded rows
             var currentCount = document.querySelectorAll('#table-container-' + specIndex + '-' + reqIndex + ' .row-class').length;
             // Slice the next 100 rows based on the currentCount
-            var additionalRows = context.failed_entities.slice(currentCount, currentCount + 100);
+            var additionalRows = getFailedRows(context, currentCount, currentCount + 100);
             
             var templateScript = document.getElementById('json-template-IDS-requirement')?.innerHTML;
             if (!templateScript) return;
@@ -900,11 +917,33 @@ function setupDetailHandlers() {
             tableContainer.insertAdjacentHTML('beforeend', html);
         
             // Hide 'Load More' button if all rows are loaded
-            if (currentCount + 100 >= context.failed_entities.length) {
+            if (currentCount + 100 >= context.failed.global_id.length) {
                 event.target.style.display = 'none';
             }
         }
     });
+}
+
+/**
+ * Build template rows for failures [start, end) of a requirement.
+ * The report stores failures column-wise with class, predefined type and
+ * reason as indexes into jsondata.lookups, to stay small for large models.
+ */
+function getFailedRows(requirement, start, end) {
+    const failed = requirement.failed;
+    const lookups = jsondata.lookups;
+    const rows = [];
+    for (let i = start; i < Math.min(end, failed.global_id.length); i++) {
+        rows.push({
+            global_id: failed.global_id[i],
+            tag: failed.tag[i],
+            name: failed.name[i],
+            class: lookups.class[failed.class[i]],
+            predefined_type: lookups.predefined_type[failed.predefined_type[i]],
+            reason: lookups.reason[failed.reason[i]]
+        });
+    }
+    return rows;
 }
 
 /**
@@ -972,9 +1011,9 @@ function copyToClipboard($this) {
 
 // helper to copy element tags to clipboard
 function copyToClipboardEntities($this, specIndex, reqIndex) {
-    const failedEntities = jsondata.specifications[specIndex].requirements[reqIndex].failed_entities;
+    const failedTags = jsondata.specifications[specIndex].requirements[reqIndex].failed.tag;
 
-    let guids = new Set(failedEntities.map(entity => entity.tag));
+    let guids = new Set(failedTags.filter(Boolean));
     var bimId = Array.from(guids).join(',').toString();
     console.log(bimId);
 
@@ -1004,9 +1043,9 @@ function copyToClipboardEntities($this, specIndex, reqIndex) {
 
 // helper to highlight failed entities (IDS report)
 function highlightFailedEntities(specIndex, reqIndex) {
-    const failedEntities = jsondata.specifications[specIndex].requirements[reqIndex].failed_entities;
+    const failedGuids = jsondata.specifications[specIndex].requirements[reqIndex].failed.global_id;
 
-    let guids = new Set(failedEntities.map(entity => entity.global_id));
+    let guids = new Set(failedGuids.filter(Boolean));
 
     // Create the query with rules based on the unique GUIDs
     let query = {
@@ -1088,12 +1127,6 @@ function highlightGroup(index) {
 // Handlebars helper functions
 Handlebars.registerHelper('formatKey', function(key) {
     return key.split('.')[0];
-});
-
-Handlebars.registerHelper('anyTags', function(failedEntities, options) {
-    // Check if any 'failed_entities' have a 'tag' property that's not empty or null
-    const hasTags = failedEntities.some(entity => entity.tag);
-    return hasTags ? options.fn(this) : options.inverse(this);
 });
 
 Handlebars.registerHelper('keyOfFirstProperty', function(context) {

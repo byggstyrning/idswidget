@@ -76,7 +76,7 @@ class WASMModule {
         return this.ready;
     }
 
-    async _sendMessage(type, payload = {}) {
+    async _sendMessage(type, payload = {}, transfer = []) {
         if (!this.worker) throw new Error('Worker not initialized');
 
         const id = this._generateId();
@@ -88,7 +88,7 @@ class WASMModule {
                 type,
                 payload,
                 id
-            });
+            }, transfer);
         });
     }
 
@@ -135,19 +135,26 @@ class WASMModule {
     }
 
     async _apiCall(method, ...args) {
+        return this._apiCallWithTransfer(method, args, []);
+    }
+
+    async _apiCallWithTransfer(method, args, transfer) {
         if (!this.ready) await this.init();
 
-        const result = await this._sendMessage(MessageType.API_CALL, { method, args });
+        const result = await this._sendMessage(MessageType.API_CALL, { method, args }, transfer);
         return result;
     }
 
     /**
      * Load an IFC file. Returns a unique ID for the loaded file.
+     * The ArrayBuffer is transferred to the worker rather than copied, so it
+     * is detached (empty) afterwards and must not be reused by the caller.
      * @param {ArrayBuffer} ifcData - The IFC file data as ArrayBuffer
      * @returns {Promise<string>} - Unique ID for the loaded IFC file
      */
     async loadIfc(ifcData) {
-        return this._apiCall('loadIfc', ifcData);
+        const transfer = ifcData instanceof ArrayBuffer ? [ifcData] : [];
+        return this._apiCallWithTransfer('loadIfc', [ifcData], transfer);
     }
 
     /**

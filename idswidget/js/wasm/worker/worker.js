@@ -86,9 +86,15 @@ async function loadConfig() {
     return CONFIG;
 }
 
+// WebAssembly memory is capped at 4 GB per worker, whatever the machine has
+const OUT_OF_MEMORY_MESSAGE = 'Out of memory: the model is too large to validate in the browser ' +
+    '(WebAssembly is limited to 4 GB). Reload the widget before validating again.';
+const OUT_OF_MEMORY_PATTERN = /MemoryError|out of memory|Aborted\(OOM\)|Cannot enlarge memory|Array buffer allocation failed|bad_alloc/i;
+
 self.addEventListener('message', async (event) => {
-    console.log("[worker] Received message:", event.data);
     const { type, payload, id } = event.data;
+    // Log the method only: logging the payload keeps large IFC buffers alive
+    console.log("[worker] Received message:", type, payload && payload.method);
 
     try {
         switch (type) {
@@ -117,10 +123,11 @@ self.addEventListener('message', async (event) => {
                 throw new Error(`[worker] Unknown message type: ${type}`);
         }
     } catch (error) {
+        const isOutOfMemory = OUT_OF_MEMORY_PATTERN.test(String(error && error.message));
         self.postMessage({
             type: MessageType.ERROR,
             payload: {
-                message: error.message,
+                message: isOutOfMemory ? OUT_OF_MEMORY_MESSAGE : error.message,
                 stack: error.stack
             },
             id
@@ -255,24 +262,110 @@ async function initAPI(pyodide) {
         return `ifc_${++messageId}_${Date.now()}`;
     }
 
-    // Pre-import the modules we'll need
+    // Lets Python report validation progress to the UI
+    pyodide.globals.set('_report_progress', (message, percent) => sendProgress(message, percent));
+
+    // Shared Python helpers. Parsed models live in _models so each IFC is
+    // parsed once (loadIfc) and reused by auditIfc.
     await pyodide.runPythonAsync(`
-import ifcopenshell
-from ifctester import ids, reporter
+import gc
 import json
+import os
+import ifcopenshell
+import ifcopenshell.util.element
+from ifctester import ids, reporter
+from ifctester.facet import get_pset, get_psets
+
+_models = {}
+
+
+def _load_model(ifc_id, path):
+    try:
+        model = ifcopenshell.open(path)
+    finally:
+        # The parsed model no longer needs the file; free the in-memory copy
+        os.remove(path)
+    _models[ifc_id] = model
+    return model.schema
+
+
+def _unload_model(ifc_id):
+    _models.pop(ifc_id, None)
+    gc.collect()
+
+
+def _validate_with_progress(ids_obj, model):
+    # Same steps as Ids.validate() in ifctester 0.8.2, one specification at a time
+    ids_obj.filepath = ids_obj.filename = None
+    get_pset.cache_clear()
+    get_psets.cache_clear()
+    specs = ids_obj.specifications
+    for i, spec in enumerate(specs):
+        _report_progress(f"Checking specification {i + 1} of {len(specs)}: {spec.name}", round(100 * i / len(specs)))
+        spec.reset_status()
+        spec.check_ifc_version(model)
+        spec.validate(model, should_filter_version=False)
+
+
+class CompactJson(reporter.Json):
+    """
+    reporter.Json without passed entities, with failures stored column-wise
+    (class, predefined type and reason as indexes into shared lookup tables).
+    Large models produce hundreds of thousands of failures, and one dict per
+    failure plus every passed entity made the report larger than the model.
+    """
+
+    def __init__(self, ids_obj):
+        super().__init__(ids_obj)
+        self._lookups = {"class": {}, "predefined_type": {}, "reason": {}}
+
+    def _index(self, table, value):
+        lookup = self._lookups[table]
+        if value not in lookup:
+            lookup[value] = len(lookup)
+        return lookup[value]
+
+    def report_passed_entities(self, requirement):
+        requirement.passed_entities.clear()
+        return []
+
+    def report_failed_entities(self, requirement):
+        failed = {"global_id": [], "tag": [], "name": [], "class": [], "predefined_type": [], "reason": []}
+        for failure in requirement.failures:
+            element = failure["element"]
+            failed["global_id"].append(getattr(element, "GlobalId", None))
+            failed["tag"].append(getattr(element, "Tag", None))
+            failed["name"].append(getattr(element, "Name", None))
+            failed["class"].append(self._index("class", element.is_a()))
+            failed["predefined_type"].append(
+                self._index("predefined_type", ifcopenshell.util.element.get_predefined_type(element))
+            )
+            failed["reason"].append(self._index("reason", failure["reason"]))
+        requirement.failures.clear()
+        return failed
+
+    def report(self):
+        results = super().report()
+        for spec_report in results["specifications"]:
+            for req_report in spec_report["requirements"]:
+                req_report.pop("passed_entities", None)
+                req_report["failed"] = req_report.pop("failed_entities")
+                req_report["has_tags"] = any(req_report["failed"]["tag"])
+        results["lookups"] = {table: list(lookup) for table, lookup in self._lookups.items()}
+        # Drop remaining element references so the model can be freed
+        for spec in self.ids.specifications:
+            spec.applicable_entities.clear()
+            spec.passed_entities.clear()
+            spec.failed_entities.clear()
+        return results
     `);
 
     console.log("[api] API initialized with ifcopenshell and ifctester");
 
     return {
         async cleanup() {
-            for (const [ifcId, _] of LoadedIFC) {
-                try {
-                    const path = `/tmp/${encodeURIComponent(ifcId)}.ifc`;
-                    pyodide.FS.unlink(path);
-                } catch (e) {
-                    console.warn("[api] Failed to cleanup file:", e);
-                }
+            for (const ifcId of LoadedIFC.keys()) {
+                await pyodide.runPythonAsync(`_unload_model(${JSON.stringify(ifcId)})`);
             }
             LoadedIFC.clear();
             console.log("[api] Cleanup complete");
@@ -281,35 +374,24 @@ import json
         async loadIfc(ifcData) {
             const ifcId = generateId();
             const path = `/tmp/${encodeURIComponent(ifcId)}.ifc`;
+            const sizeMb = Math.round(ifcData.byteLength / 1e6);
 
-            pyodide.FS.writeFile(path, new Uint8Array(ifcData));
+            // canOwn: the filesystem keeps this buffer instead of copying it
+            pyodide.FS.writeFile(path, new Uint8Array(ifcData), { canOwn: true });
 
-            // Load IFC and get schema info
-            const result = await pyodide.runPythonAsync(`
-import json
-import ifcopenshell
-ifc = ifcopenshell.open("${path}")
-json.dumps({"schema": ifc.schema})
-            `);
-            
-            const parsed = JSON.parse(result);
-            const ifcSchema = parsed.schema;
+            sendProgress(`Reading IFC model (${sizeMb} MB)...`);
+            const ifcSchema = await pyodide.runPythonAsync(
+                `_load_model(${JSON.stringify(ifcId)}, ${JSON.stringify(path)})`
+            );
 
             LoadedIFC.set(ifcId, { schema: ifcSchema });
-            console.log("[api] Loaded IFC file:", ifcId, "schema:", ifcSchema);
-            
+            console.log("[api] Loaded IFC file:", ifcId, "schema:", ifcSchema, `${sizeMb} MB`);
+
             return { ifcId, schema: ifcSchema };
         },
 
         async unloadIfc(ifcId) {
-            const path = `/tmp/${encodeURIComponent(ifcId)}.ifc`;
-
-            try {
-                pyodide.FS.unlink(path);
-            } catch (e) {
-                console.warn("[api] File already removed:", e);
-            }
-            
+            await pyodide.runPythonAsync(`_unload_model(${JSON.stringify(ifcId)})`);
             LoadedIFC.delete(ifcId);
             console.log("[api] Unloaded IFC file:", ifcId);
         },
@@ -464,9 +546,7 @@ json.dumps({"incompatible": incompatible})
         },
 
         async auditIfc(ifcId, idsData) {
-            const ifcInfo = LoadedIFC.get(ifcId);
-            
-            if (!ifcInfo) {
+            if (!LoadedIFC.has(ifcId)) {
                 throw new Error(`IFC file not found: ${ifcId}`);
             }
 
@@ -474,18 +554,17 @@ json.dumps({"incompatible": incompatible})
             const idsPath = `/tmp/${encodeURIComponent(ifcId)}.ids`;
             pyodide.FS.writeFile(idsPath, idsString);
 
-            // Run validation with schema compatibility checking
+            // Run validation with schema compatibility checking.
+            // The report string is left in _last_report rather than embedded in
+            // the result JSON, so a large report isn't escaped and parsed twice.
             const result = await pyodide.runPythonAsync(`
-import json
-from ifctester import ids, reporter
-import ifcopenshell
-import ifcopenshell.util.schema
 import xml.etree.ElementTree as ET
 import re
 
 result = None
-ifc_path = "/tmp/${encodeURIComponent(ifcId)}.ifc"
-ids_path = "${idsPath}"
+_last_report = None
+ifc_id = ${JSON.stringify(ifcId)}
+ids_path = ${JSON.stringify(idsPath)}
 
 def check_ids_schema_compatibility(ids_xml_content, ifc_schema):
     """
@@ -494,161 +573,129 @@ def check_ids_schema_compatibility(ids_xml_content, ifc_schema):
     """
     incompatible_entities = []
     schema_obj = ifcopenshell.ifcopenshell_wrapper.schema_by_name(ifc_schema)
-    
-    # Parse the IDS XML
+
     try:
         root = ET.fromstring(ids_xml_content)
     except ET.ParseError:
         return []  # Let the IDS parser handle XML errors
-    
-    # Find all entity facets - handle both namespaced and non-namespaced XML
-    namespaces = {
-        'ids': 'http://standards.buildingsmart.org/IDS',
-        'xs': 'http://www.w3.org/2001/XMLSchema'
-    }
-    
-    # Try namespaced first
-    entity_elements = root.findall('.//ids:entity', namespaces)
-    if not entity_elements:
-        # Fall back to searching without namespace
-        entity_elements = root.findall('.//{*}entity')
-    if not entity_elements:
-        # Try direct search for 'entity' elements
-        entity_elements = []
-        for elem in root.iter():
-            if elem.tag.endswith('entity') or elem.tag == 'entity':
-                entity_elements.append(elem)
-    
+
+    entity_elements = [elem for elem in root.iter() if elem.tag.endswith('entity')]
+
     for entity_elem in entity_elements:
-        # Get the name element (could be simpleValue, restriction with enumeration, etc.)
         name_elem = None
         for child in entity_elem:
-            tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+            tag = child.tag.split('}')[-1]
             if tag == 'name':
                 name_elem = child
                 break
-        
+
         if name_elem is None:
             continue
-            
-        # Extract entity type name(s) from the name element
+
         entity_names = []
-        
-        # Check for simpleValue child
         for child in name_elem:
-            tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+            tag = child.tag.split('}')[-1]
             if tag == 'simpleValue':
                 if child.text:
                     entity_names.append(child.text.strip().upper())
             elif tag == 'restriction':
-                # Handle xs:restriction with enumeration values
                 for enum_elem in child:
-                    enum_tag = enum_elem.tag.split('}')[-1] if '}' in enum_elem.tag else enum_elem.tag
-                    if enum_tag == 'enumeration':
+                    if enum_elem.tag.split('}')[-1] == 'enumeration':
                         value = enum_elem.get('value')
                         if value:
                             entity_names.append(value.strip().upper())
-        
-        # Check each entity name against the schema
+
         for entity_name in entity_names:
             try:
                 schema_obj.declaration_by_name(entity_name)
             except RuntimeError:
                 incompatible_entities.append(entity_name)
-    
-    return list(set(incompatible_entities))  # Remove duplicates
+
+    return list(set(incompatible_entities))
+
+def _failure(error, error_type, **extra):
+    return {
+        "success": False,
+        "error": error,
+        "error_type": error_type,
+        "total_specifications": 0,
+        "passed_specifications": 0,
+        "failed_specifications": 0,
+        "report": None,
+        **extra,
+    }
 
 try:
-    # Step 1: Validate the IDS file structure against the XSD schema (no IFC needed)
-    # This catches malformed IDS files early with clear error messages
+    # Step 1: Validate the IDS file structure against the XSD schema
     try:
         my_ids = ids.open(ids_path, validate=True)
     except ids.IdsXmlValidationError as xml_err:
-        # IDS file doesn't conform to the XSD schema
-        result = {
-            "success": False,
-            "error": f"Invalid IDS file: {str(xml_err)}",
-            "error_type": "ids_xml_validation",
-            "total_specifications": 0,
-            "passed_specifications": 0,
-            "failed_specifications": 0,
-            "report": None
-        }
-        raise StopIteration()  # Use to exit the try block early
-    
-    # Step 2: Load the IFC file and get its schema
-    my_ifc = ifcopenshell.open(ifc_path)
+        result = _failure(f"Invalid IDS file: {str(xml_err)}", "ids_xml_validation")
+        raise StopIteration()
+
+    # Step 2: Take the model parsed by loadIfc; it's freed once the report is built
+    my_ifc = _models.pop(ifc_id)
     ifc_schema = my_ifc.schema
-    
-    # Step 3: Read IDS content for entity type compatibility check
+
+    # Step 3: Check if entity types in IDS exist in the IFC schema
     with open(ids_path, 'r', encoding='utf-8') as f:
         ids_content = f.read()
-    
-    # Step 4: Check if entity types in IDS exist in the IFC schema
     incompatible = check_ids_schema_compatibility(ids_content, ifc_schema)
-    
+
     if incompatible:
-        # Return a user-friendly error about schema mismatch
-        entity_list = ', '.join(sorted(incompatible)[:10])  # Show first 10
+        entity_list = ', '.join(sorted(incompatible)[:10])
         more_count = len(incompatible) - 10 if len(incompatible) > 10 else 0
         more_text = f' and {more_count} more' if more_count > 0 else ''
-        result = {
-            "success": False,
-            "error": f"Schema mismatch: The IDS file references entity types that don't exist in {ifc_schema}: {entity_list}{more_text}. The IDS may be designed for a newer IFC version (e.g., IFC4).",
-            "error_type": "schema_mismatch",
-            "total_specifications": 0,
-            "passed_specifications": 0,
-            "failed_specifications": 0,
-            "report": None,
-            "incompatible_entities": incompatible
-        }
+        result = _failure(
+            f"Schema mismatch: The IDS file references entity types that don't exist in {ifc_schema}: {entity_list}{more_text}. The IDS may be designed for a newer IFC version (e.g., IFC4).",
+            "schema_mismatch",
+            incompatible_entities=incompatible,
+        )
     else:
-        # Step 5: Run full IFC validation against IDS
-        my_ids.validate(my_ifc)
-        
-        json_reporter = reporter.Json(my_ids)
-        json_reporter.report()
-        json_report = json_reporter.to_string()
-        
+        # Step 4: Validate, then build the compact report
+        _validate_with_progress(my_ids, my_ifc)
+        _report_progress("Building report...", 100)
+        compact = CompactJson(my_ids)
+        report_data = compact.report()
+
         total_specs = len(my_ids.specifications)
         passed_specs = sum(1 for spec in my_ids.specifications if spec.status)
-        failed_specs = total_specs - passed_specs
-        
+
+        # Free the model before serialising the report
+        del compact, my_ifc
+        gc.collect()
+        _last_report = json.dumps(report_data, default=reporter.Json.encode)
+        del report_data
+
         result = {
             "success": True,
             "total_specifications": total_specs,
             "passed_specifications": passed_specs,
-            "failed_specifications": failed_specs,
-            "report": json_report
+            "failed_specifications": total_specs - passed_specs,
+            "report": None
         }
 except StopIteration:
     pass  # Result already set in the IDS validation block
+except MemoryError:
+    result = _failure("OUT_OF_MEMORY", "out_of_memory")
 except Exception as e:
-    import traceback
     error_msg = str(e)
-    tb = traceback.format_exc()
-    
-    # Try to extract meaningful error message
+
     if "not found in schema" in error_msg.lower():
-        # Extract entity name from error message
         match = re.search(r"Entity with name '([^']+)' not found in schema '([^']+)'", error_msg, re.IGNORECASE)
         if match:
             entity_name, schema_name = match.groups()
             error_msg = f"Schema mismatch: The entity type '{entity_name}' does not exist in {schema_name}. The IDS may be designed for a newer IFC version."
-    
-    result = {
-        "success": False,
-        "error": f"Validation error: {error_msg}",
-        "error_type": "validation_error",
-        "total_specifications": 0,
-        "passed_specifications": 0,
-        "failed_specifications": 0,
-        "report": None
-    }
+
+    result = _failure(f"Validation error: {error_msg}", "validation_error")
+finally:
+    _models.pop(ifc_id, None)
+    gc.collect()
 
 json.dumps(result)
             `);
 
+            LoadedIFC.delete(ifcId);
             try {
                 pyodide.FS.unlink(idsPath);
             } catch (e) {
@@ -656,16 +703,20 @@ json.dumps(result)
             }
 
             const parsed = JSON.parse(result);
-            
+
             if (!parsed.success) {
                 console.error("[api] Validation error:", parsed.error);
-                throw new Error(parsed.error);
+                throw new Error(parsed.error === 'OUT_OF_MEMORY' ? OUT_OF_MEMORY_MESSAGE : parsed.error);
             }
-            
+
+            parsed.report = pyodide.globals.get('_last_report');
+            pyodide.globals.set('_last_report', null);
+
             console.log("[api] Validation complete:", {
                 total: parsed.total_specifications,
                 passed: parsed.passed_specifications,
-                failed: parsed.failed_specifications
+                failed: parsed.failed_specifications,
+                reportMb: (parsed.report.length / 1e6).toFixed(1)
             });
 
             return parsed;
