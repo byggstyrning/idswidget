@@ -1,25 +1,27 @@
-FROM python:3.10-slim
+FROM python:3.13-slim
 
 WORKDIR /app
 
-# Install curl for downloading files
-RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+# constraints.txt locks transitive deps so rebuilds are reproducible
+# (regenerate it with `pip freeze` after deliberately upgrading requirements.txt)
+COPY idswidget/requirements.txt idswidget/constraints.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -c constraints.txt
 
 COPY idswidget/ .
-RUN pip install -r requirements.txt
 
 # Use the local streambim-widget-api.min.js that's already in the repo
 # DO NOT download from GitHub - the master branch has a newer Penpal version
 # that's incompatible with StreamBIM's production app
 
-# Download Python wheels for WASM at build time (more reliable than runtime)
-# Using IfcOpenShell/wasm-wheels repo - the official source for Pyodide-compatible wheels
-# odfpy wheel is from IfcOpenShell's ifctester webapp (custom-built wheel with py2.py3-none-any tag)
-RUN mkdir -p /app/wheels && \
-    curl -L -o /app/wheels/ifcopenshell-0.8.2-cp312-cp312-emscripten_3_1_58_wasm32.whl \
-        "https://raw.githubusercontent.com/IfcOpenShell/wasm-wheels/main/ifcopenshell-0.8.2%2Bd50e806-cp312-cp312-emscripten_3_1_58_wasm32.whl" && \
-    curl -L -o /app/wheels/odfpy-1.4.2-py2.py3-none-any.whl \
-        "https://raw.githubusercontent.com/IfcOpenShell/IfcOpenShell/v0.8.0/src/ifctester/webapp/public/worker/bin/odfpy-1.4.2-py2.py3-none-any.whl" && \
-    ls -la /app/wheels/
+# Pyodide wheels are committed in wheels/ (ifcopenshell from IfcOpenShell/wasm-wheels,
+# odfpy from IfcOpenShell's ifctester webapp). Fail the build if they've been altered.
+RUN printf '%s\n' \
+    'f7dfe36e166365dc9dabd0913d2020f84ba536045762f48a5450fe21cc0bc2b7  wheels/ifcopenshell-0.8.2-cp312-cp312-emscripten_3_1_58_wasm32.whl' \
+    '29dcd08f85303642875b033c70b11942eec74c299c1c7f3cba340347eeba9283  wheels/odfpy-1.4.2-py2.py3-none-any.whl' \
+    | sha256sum -c -
+
+# Run as an unprivileged user (FastHTML writes .sesskey into /app on first start)
+RUN useradd --system --no-create-home app && chown -R app /app
+USER app
 
 CMD ["python", "idswidget.py"]

@@ -814,8 +814,22 @@ async function handleValidateClick() {
                         <button onclick="location.reload()" class="reload-button">Reload Widget</button>
                     </div>`;
             } else {
-                // Show the actual error message for recoverable errors
-                loadingIndicator.innerHTML = `<div class="error">Validation failed: ${error.message}</div>`;
+                // Show the last line (e.g. "ModuleNotFoundError: ...") up front,
+                // with the full Python traceback collapsed underneath
+                const message = String(error.message || error);
+                const lines = message.trim().split('\n');
+                const summary = lines[lines.length - 1];
+                let errorHtml = `<div class="error validation-error">
+                    <h3>Validation failed</h3>
+                    <p>${escapeHtml(summary)}</p>`;
+                if (lines.length > 1) {
+                    errorHtml += `<details>
+                        <summary>Details</summary>
+                        <pre class="error-traceback">${escapeHtml(message)}</pre>
+                    </details>`;
+                }
+                errorHtml += `</div>`;
+                loadingIndicator.innerHTML = errorHtml;
             }
         }
         

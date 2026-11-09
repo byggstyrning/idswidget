@@ -79,7 +79,8 @@ async function loadConfig() {
         CONFIG = {
             pyodide_url: 'https://cdn.jsdelivr.net/pyodide/v0.27.0/full/',
             wheel_url: 'https://github.com/AECgeeks/ifcopenshell-wasm/releases/download/v0.8.0/ifcopenshell-0.8.0-cp312-cp312-pyodide_2024_0_wasm32.whl',
-            odfpy_url: 'https://files.pythonhosted.org/packages/py2.py3/o/odfpy/odfpy-1.4.2-py2.py3-none-any.whl'
+            odfpy_url: 'https://files.pythonhosted.org/packages/py2.py3/o/odfpy/odfpy-1.4.2-py2.py3-none-any.whl',
+            ifctester_version: '0.8.2'
         };
     }
     return CONFIG;
@@ -223,8 +224,14 @@ async function initEnvironment() {
 
     sendProgress('Installing ifctester...', 80);
     
-    // Install ifctester
-    await micropip.install('ifctester');
+    // Install ifctester pinned to the ifcopenshell wheel version.
+    // Unpinned installs pick up newer releases (e.g. 0.9.0 imports sqlite3,
+    // which Pyodide doesn't ship by default) and break validation.
+    const ifctesterSpec = CONFIG.ifctester_version
+        ? `ifctester==${CONFIG.ifctester_version}`
+        : 'ifctester';
+    await micropip.install(ifctesterSpec);
+    console.log('[worker] Installed', ifctesterSpec);
 
     sendProgress('Initializing API...', 90);
     

@@ -3,6 +3,7 @@
         "cache_version": "v1",
         "pyodide_url": "https://cdn.jsdelivr.net/pyodide/v0.27.0/full/",
         "wheel_url": "/wheels/ifcopenshell-0.8.2-cp312-cp312-emscripten_3_1_58_wasm32.whl",
-        "odfpy_url": "/wheels/odfpy-1.4.2-py2.py3-none-any.whl"
+        "odfpy_url": "/wheels/odfpy-1.4.2-py2.py3-none-any.whl",
+        "ifctester_version": "0.8.2"
     }
 }

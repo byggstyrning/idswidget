@@ -287,6 +287,15 @@ div#loading-indicator {
     border-radius: 5px;
     font-weight: bold;
     text-align: center;
+    overflow-wrap: anywhere;
+}
+
+.error-traceback {
+    margin: 10px 0 0 0;
+    font-size: 0.8em;
+    font-weight: normal;
+    white-space: pre-wrap;
+    overflow-x: auto;
 }
 
 .error p {

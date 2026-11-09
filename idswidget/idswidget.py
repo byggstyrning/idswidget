@@ -14,8 +14,15 @@ import time
 import logging
 import requests
 import json
+import socket
+import ipaddress
+from urllib.parse import urlsplit, urljoin
 
 logger = logging.getLogger(__name__)
+
+# The download proxy only fetches from StreamBIM (any *.streambim.com host)
+PROXY_ALLOWED_DOMAIN = 'streambim.com'
+PROXY_MAX_REDIRECTS = 5
 
 # Cache-busting timestamp - generated once at module load
 CACHE_BUST = int(time.time())
@@ -24,7 +31,7 @@ CACHE_BUST = int(time.time())
 hdrs = (  
     Link(rel="stylesheet", href=f"/styles.css?t={CACHE_BUST}"),
     Link(rel="stylesheet", href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.1.1/css/all.min.css"),
-    Script(src="https://cdnjs.cloudflare.com/ajax/libs/handlebars.js/4.7.7/handlebars.min.js"),
+    Script(src="https://cdnjs.cloudflare.com/ajax/libs/handlebars.js/4.7.10/handlebars.min.js"),
     Script(src=f"/js/streambim-widget-api.min.js?t={CACHE_BUST}"),
     # Connect to StreamBIM IMMEDIATELY with inline sync script (before ES module loads)
     # Using the OLD v2 API: connect() instead of connectToParent()
@@ -61,7 +68,7 @@ def _continue():
     pass
 
 # Create the Beforeware instance with the before function
-bware = Beforeware(_continue, skip=[r'/favicon\.ico', r'/js/.*', r'.*\.css', r'/config\.json', r'/proxy/.*', r'/wheels/.*'])
+bware = Beforeware(_continue, skip=[r'/favicon\.ico', r'/js/.*', r'.*\.css', r'/config\.json', r'/proxy/download', r'/wheels/.*'])
 
 app, rt = fast_app(
     before=bware,
@@ -163,105 +170,82 @@ def get_config():
             headers={'Access-Control-Allow-Origin': '*'}
         )
 
+def _is_public_host(hostname: str) -> bool:
+    """Return True if every address the hostname resolves to is a public IP."""
+    try:
+        infos = socket.getaddrinfo(hostname, 443, proto=socket.IPPROTO_TCP)
+    except socket.gaierror:
+        return False
+    return all(ipaddress.ip_address(info[4][0]).is_global for info in infos)
+
+def _is_allowed_proxy_url(url: str, first_hop: bool) -> bool:
+    """
+    The first request must go to StreamBIM over https. Redirects (e.g. to file
+    storage) may leave StreamBIM, but only over https to public addresses.
+    """
+    parts = urlsplit(url)
+    host = (parts.hostname or '').lower()
+    if parts.scheme != 'https' or not host or parts.username or parts.password:
+        return False
+    is_streambim = host == PROXY_ALLOWED_DOMAIN or host.endswith('.' + PROXY_ALLOWED_DOMAIN)
+    if first_hop and not is_streambim:
+        return False
+    return _is_public_host(host)
+
+def _proxy_error(message: str, status_code: int) -> Response:
+    return Response(
+        content=json.dumps({"error": message}),
+        status_code=status_code,
+        media_type='application/json'
+    )
+
 @rt('/proxy/download')
 def proxy_download(url: str, request: Request = None):
     """
     Proxy endpoint to download files from StreamBIM, avoiding CORS issues.
-    Forwards cookies from the client request to StreamBIM.
+    Only StreamBIM URLs are accepted; redirects are followed manually so each
+    hop is checked. Client cookies are not forwarded.
     """
+    user_agent = 'IDS-Widget/1.0'
+    if request:
+        user_agent = request.headers.get('User-Agent', user_agent)
+
+    if not _is_allowed_proxy_url(url, first_hop=True):
+        logger.warning(f"Proxy download rejected URL host: {urlsplit(url).hostname}")
+        return _proxy_error("URL not allowed", 400)
+
     try:
-        # Get cookies and headers from the incoming request
-        cookies = ''
-        user_agent = 'IDS-Widget/1.0'
-        
-        if request:
-            cookies = request.headers.get('Cookie', '')
-            user_agent = request.headers.get('User-Agent', user_agent)
-        
-        # Make request to StreamBIM with forwarded cookies
-        headers = {
-            'User-Agent': user_agent
-        }
-        if cookies:
-            headers['Cookie'] = cookies
-        
-        response = requests.get(
-            url,
-            headers=headers,
-            stream=True,
-            timeout=300
-        )
-        
+        current_url = url
+        for _ in range(PROXY_MAX_REDIRECTS + 1):
+            response = requests.get(
+                current_url,
+                headers={'User-Agent': user_agent},
+                allow_redirects=False,
+                timeout=300
+            )
+            if not response.is_redirect:
+                break
+            next_url = urljoin(current_url, response.headers['Location'])
+            if not _is_allowed_proxy_url(next_url, first_hop=False):
+                logger.warning(f"Proxy download rejected redirect to: {urlsplit(next_url).hostname}")
+                return _proxy_error("Redirect target not allowed", 502)
+            current_url = next_url
+        else:
+            return _proxy_error("Too many redirects", 502)
+
         response.raise_for_status()
-        
-        # Return the file content with appropriate headers
+
+        # Same-origin use only: no CORS headers, so other sites can't read the result
         return Response(
             content=response.content,
             headers={
                 'Content-Type': response.headers.get('Content-Type', 'application/octet-stream'),
-                'Content-Length': str(len(response.content)),
-                'Access-Control-Allow-Origin': '*',
-                'Access-Control-Allow-Credentials': 'true'
+                'Content-Length': str(len(response.content))
             }
         )
     except requests.RequestException as e:
-        logger.error(f"Proxy download error: {str(e)}")
-        return {"error": f"Failed to download file: {str(e)}"}, 500
-
-@rt('/proxy/wheel')
-def proxy_wheel(url: str):
-    """
-    Proxy endpoint to download Python wheel files, avoiding CORS issues.
-    Used for downloading ifcopenshell and other wheels for Pyodide.
-    """
-    try:
-        logger.info(f"Proxy wheel request for: {url}")
-        
-        # Use a browser-like User-Agent to avoid being blocked
-        response = requests.get(
-            url,
-            headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'application/octet-stream,*/*'
-            },
-            allow_redirects=True,
-            timeout=600  # Longer timeout for large wheel files
-        )
-        
-        logger.info(f"Proxy wheel response: status={response.status_code}, size={len(response.content)}, content-type={response.headers.get('Content-Type', 'unknown')}")
-        
-        response.raise_for_status()
-        
-        # Verify we got a zip-like file (wheel files start with PK)
-        content = response.content
-        if len(content) < 4 or content[:2] != b'PK':
-            logger.error(f"Proxy wheel: Response does not appear to be a zip file. First 100 bytes: {content[:100]}")
-            return Response(
-                content=json.dumps({"error": "Downloaded content is not a valid wheel file"}),
-                status_code=502,
-                media_type='application/json',
-                headers={'Access-Control-Allow-Origin': '*'}
-            )
-        
-        # Return the wheel file with appropriate headers
-        return Response(
-            content=content,
-            headers={
-                'Content-Type': 'application/zip',  # Wheel files are zip archives
-                'Content-Length': str(len(content)),
-                'Access-Control-Allow-Origin': '*',
-                'Access-Control-Allow-Credentials': 'true',
-                'Cache-Control': 'public, max-age=86400'  # Cache for 24 hours
-            }
-        )
-    except requests.RequestException as e:
-        logger.error(f"Proxy wheel download error: {str(e)}")
-        return Response(
-            content=json.dumps({"error": f"Failed to download wheel: {str(e)}"}),
-            status_code=500,
-            media_type='application/json',
-            headers={'Access-Control-Allow-Origin': '*'}
-        )
+        logger.error(f"Proxy download error: {type(e).__name__}")
+        return _proxy_error("Failed to download file", 502)
 
 @rt('/wheels/{filename}')
 def serve_wheel(filename: str):
